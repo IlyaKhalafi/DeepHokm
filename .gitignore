@@ -151,10 +151,10 @@ activemq-data/
 .env
 .envrc
 .venv
-env/
-venv/
-ENV/
-env.bak/
+/env/
+/venv/
+/ENV/
+/env.bak/
 venv.bak/
 
 # Spyder project settings
@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# DeepHokm project artifacts
+*.local.md
+logs/
+checkpoints/
+figures/
