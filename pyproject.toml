@@ -87,6 +87,9 @@ testpaths = ["tests"]
 addopts = "--cov=deephokm --cov-report=term-missing --cov-branch -q"
 filterwarnings = [
     "ignore::DeprecationWarning:gymnasium.*",
+    # The env checker warns about any wrapper; our test-local legality shim is
+    # deliberate (see CheckerProbeShim in tests/test_hokm_env.py).
+    "ignore:.*different from the unwrapped version.*:UserWarning",
 ]
 
 [tool.coverage.run]

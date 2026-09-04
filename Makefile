@@ -18,7 +18,7 @@ endif
 
 ARGS ?=
 
-.PHONY: help test lint format
+.PHONY: help test lint format bench
 
 help:  ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -33,3 +33,6 @@ lint:  ## Run ruff lint
 format:  ## Apply ruff formatting and lint fixes
 	uv run ruff format .
 	uv run ruff check --fix .
+
+bench:  ## Benchmark environment throughput
+	uv run python scripts/bench_env.py

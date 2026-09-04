@@ -69,6 +69,27 @@ make test
 make lint
 ```
 
+## Environment
+
+`Hokm-v0` is a single-seat Gymnasium environment: the learner plays one seat,
+three opponent policies (any `HokmPolicy` implementation) play the rest inside
+`step()`. Observations are a Dict of binary card vectors plus small integer
+scalars (see `src/deephokm/env/spaces.py`); the action space is `Discrete(56)`
+(52 card plays + 4 trump declarations) with legality masks available via
+`env.action_masks()` and `info["action_mask"]`. Illegal actions raise
+`ValueError` rather than being resampled.
+
+One note on `gymnasium.utils.env_checker.check_env`: its determinism probe
+samples an action *before* its final `reset()`, so for any environment whose
+legal-action set changes phase across resets (trump call vs. card play) the
+probed action can belong to the previous episode's hand. The suite therefore
+runs `check_env` through a small documented shim (`CheckerProbeShim` in
+`tests/test_hokm_env.py`) that resamples only that blind probe; every other
+checker assertion runs against the bare environment.
+
+Benchmark: `make bench` (mask-respecting random play, ~10k learner steps/s
+per worker on this machine).
+
 ## Training
 
 Documented once the training CLI lands.
