@@ -1,9 +1,13 @@
 """Observation and action space definitions for HokmEnv.
 
 The observation is a Dict space from the acting player's perspective. The
-layout is frozen by the project specification; the network's tokenizer and
-the tests both depend on it. Any additive change must update the feature
-extractor and tests in the same commit.
+network's tokenizer and the tests both depend on the layout, so any change
+here must update the feature extractor and tests in the same commit.
+
+``history`` is the one addition to the base layout: the binary ``seen``
+vector records *which* cards have been played but not *when*, and a
+trick-taking policy needs play order to read the table. It carries the
+completed tricks of the current hand in reverse play order.
 """
 
 from __future__ import annotations
@@ -14,7 +18,11 @@ import numpy as np
 from gymnasium import spaces
 
 from deephokm.cards import NUM_CARDS, NUM_SUITS
-from deephokm.rules.state import NUM_SEATS
+from deephokm.rules.state import NUM_SEATS, TRICKS_PER_HAND
+
+# Cards from completed tricks in one hand: 12 finished tricks at most, because
+# the thirteenth ends the hand. The current trick has its own observation slot.
+HISTORY_SLOTS = (TRICKS_PER_HAND - 1) * NUM_SEATS
 
 
 class Observation(TypedDict):
@@ -27,6 +35,9 @@ class Observation(TypedDict):
         trick_play: Box(4) — card id (or -1) played by each seat in the
             current trick, in seat order; -1 for seats yet to play. The leader
             is the first seat with a card.
+        history: Box(48) — card ids from this hand's completed tricks in
+            reverse play order (most recent first), -1 padded. Play order is
+            not recoverable from ``seen``, so it is carried explicitly.
         trump: MultiBinary(4) — one-hot trump suit; all zeros before declared.
         phase: MultiBinary(2) — [trump-call, card-play].
         tricks_won: Box(2) — [own team, opposing team] tricks this hand.
@@ -38,6 +49,7 @@ class Observation(TypedDict):
     seen: np.ndarray
     trick: np.ndarray
     trick_play: np.ndarray
+    history: np.ndarray
     trump: np.ndarray
     phase: np.ndarray
     tricks_won: np.ndarray
@@ -55,6 +67,9 @@ def observation_space() -> spaces.Dict:
             "trick_play": spaces.Box(
                 low=-1, high=NUM_CARDS - 1, shape=(NUM_SEATS,), dtype=np.int64
             ),
+            "history": spaces.Box(
+                low=-1, high=NUM_CARDS - 1, shape=(HISTORY_SLOTS,), dtype=np.int64
+            ),
             "trump": spaces.MultiBinary(NUM_SUITS),
             "phase": spaces.MultiBinary(2),
             "tricks_won": spaces.Box(low=0, high=13, shape=(2,), dtype=np.int64),
@@ -71,6 +86,7 @@ def empty_observation() -> Observation:
         seen=np.zeros(NUM_CARDS, dtype=np.int8),
         trick=np.zeros(NUM_CARDS, dtype=np.int8),
         trick_play=np.full(NUM_SEATS, -1, dtype=np.int64),
+        history=np.full(HISTORY_SLOTS, -1, dtype=np.int64),
         trump=np.zeros(NUM_SUITS, dtype=np.int8),
         phase=np.zeros(2, dtype=np.int8),
         tricks_won=np.zeros(2, dtype=np.int64),

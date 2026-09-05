@@ -14,8 +14,11 @@ import deephokm.nn.extractor as extractor_mod
 from deephokm.env import HokmEnv
 from deephokm.env.spaces import empty_observation, observation_space
 from deephokm.nn.extractor import HokmTransformerExtractor
-from deephokm.nn.policy import HokmMaskablePolicy
+from deephokm.nn.policy import POLICY_HEAD_GAIN, VALUE_HEAD_GAIN, HokmMaskablePolicy
 from deephokm.nn.tokenizer import (
+    CTX_COLUMNS,
+    NUM_HAND_SLOTS,
+    NUM_TRICK_SLOTS,
     tokenize,
     tokenize_tensor_batch,
 )
@@ -223,16 +226,22 @@ def test_hand_order_invariance() -> None:
 
 
 def test_tokenizer_layout_is_fixed() -> None:
-    """Hand at 0-12, trick at 13-16, history at 17-29, context at 30-34."""
+    """Hand, then the trick, then history, then the context slots."""
     states = gather_states(6)
+    hist_start = NUM_HAND_SLOTS + NUM_TRICK_SLOTS
     for state in states:
         t = tokenize(state)
         tokens = t.tokens[0].tolist()
         hand = sorted(int(c) for c in np.flatnonzero(state["hand"]))
         assert tokens[: len(hand)] == hand
-        assert tokens[13 + len(_played_cards(state)) : 17] == [52] * (4 - len(_played_cards(state)))
+        n_played = len(_played_cards(state))
+        assert tokens[NUM_HAND_SLOTS + n_played : hist_start] == [52] * (
+            NUM_TRICK_SLOTS - n_played
+        )
+        history = [int(c) for c in state["history"] if c >= 0]
+        assert tokens[hist_start : hist_start + len(history)] == history
         # Context slots always present.
-        assert t.padding_mask[0][30:35].all()
+        assert t.padding_mask[0][list(CTX_COLUMNS)].all()
 
 
 def _played_cards(state: dict[str, np.ndarray]) -> list[int]:
@@ -355,8 +364,8 @@ def test_policy_head_gains_are_orthogonal_spec() -> None:
     # Orthogonal init with gain g gives rows with norm ~g.
     action_rows = policy.action_net.weight.norm(dim=1)
     value_rows = policy.value_net.weight.norm(dim=1)
-    assert th.allclose(action_rows, th.full_like(action_rows, 0.01), atol=1e-3)
-    assert th.allclose(value_rows, th.full_like(value_rows, 1.0), atol=1e-3)
+    assert th.allclose(action_rows, th.full_like(action_rows, POLICY_HEAD_GAIN), atol=1e-3)
+    assert th.allclose(value_rows, th.full_like(value_rows, VALUE_HEAD_GAIN), atol=1e-3)
 
 
 def test_masking_applied_in_forward() -> None:

@@ -15,6 +15,7 @@ from gymnasium.utils.env_checker import check_env
 from deephokm.cards import NUM_CARDS, NUM_SUITS
 from deephokm.env import HokmEnv
 from deephokm.env.hokm_env import Observation
+from deephokm.env.spaces import HISTORY_SLOTS
 from deephokm.policies.random_policy import RandomPolicy
 from deephokm.rules.legality import NUM_ACTIONS
 from deephokm.rules.state import NUM_SEATS, TRICKS_PER_HAND, team_of
@@ -348,15 +349,20 @@ def test_no_hidden_information_leak() -> None:
             expected_seen[played] = 1
             expected_trick = np.zeros(NUM_CARDS, dtype=np.int8)
             expected_trick[on_table] = 1
+            completed = played[: len(played) - len(on_table)]
+            expected_history = np.full(HISTORY_SLOTS, -1, dtype=np.int64)
+            expected_history[: len(completed)] = completed[::-1]
             np.testing.assert_array_equal(obs["hand"], expected_hand)
             np.testing.assert_array_equal(obs["seen"], expected_seen)
             np.testing.assert_array_equal(obs["trick"], expected_trick)
+            np.testing.assert_array_equal(obs["history"], expected_history)
             # A partner's hidden hand must never appear anywhere.
             partner = (seat + 2) % NUM_SEATS
             partner_private = set(env._engine.state.hands.hands[partner]) - set(played)
             for card in partner_private:
                 assert obs["hand"][card] == 0
                 assert obs["trick"][card] == 0
+                assert card not in obs["history"].tolist()
                 if card not in hand:
                     assert obs["seen"][card] == 0
             mask = info["action_mask"]
@@ -510,3 +516,51 @@ def test_env_pickles_for_subproc_vec_env() -> None:
     assert info["action_mask"].sum() > 0
     with pytest.raises(RuntimeError, match="lost its legal-action provider"):
         restored.action_space.sample()
+
+
+def test_history_is_reverse_play_order_of_completed_tricks() -> None:
+    """The history slot must carry recency, which ``seen`` cannot express."""
+    env = HokmEnv(seat=0, opponents=random_opponents(9))
+    obs, info = env.reset(seed=9)
+    rng = random.Random(9)
+    done = False
+    saw_full_trick = False
+    while not done:
+        played = env.engine.state.hands.played
+        on_table = [card for _, card in env.engine.state.hands.current_trick]
+        completed = played[: len(played) - len(on_table)]
+        history = [int(card) for card in obs["history"] if card >= 0]
+        assert history == completed[::-1]
+        # Nothing on the table is also in history, and nothing repeats.
+        assert not set(history) & set(on_table)
+        assert len(set(history)) == len(history)
+        if len(completed) >= NUM_SEATS:
+            saw_full_trick = True
+        action = int(rng.choice(np.flatnonzero(info["action_mask"]).tolist()))
+        obs, _reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+    assert saw_full_trick, "the episode must cover at least one completed trick"
+    env.close()
+
+
+def test_history_resets_between_hands() -> None:
+    """History is per hand: a new deal starts from an empty history."""
+    env = HokmEnv(seat=0, opponents=random_opponents(21))
+    obs, info = env.reset(seed=21)
+    rng = random.Random(21)
+    hand_number = info["hand_number"]
+    checked = 0
+    done = False
+    while not done and checked < 3:
+        action = int(rng.choice(np.flatnonzero(info["action_mask"]).tolist()))
+        obs, _reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+        if not done and info["hand_number"] != hand_number:
+            hand_number = info["hand_number"]
+            played = env.engine.state.hands.played
+            on_table = [card for _, card in env.engine.state.hands.current_trick]
+            completed = len(played) - len(on_table)
+            assert int((obs["history"] >= 0).sum()) == completed
+            checked += 1
+    assert checked > 0, "the episode must span more than one hand"
+    env.close()

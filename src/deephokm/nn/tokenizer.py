@@ -4,11 +4,15 @@ The Dict observation becomes a card-token sequence plus context tokens:
 
 - up to 13 hand tokens (order-free; the hand is a set),
 - up to 4 current-trick tokens in play order,
-- up to 13 recently played cards from completed tricks, ordered by
-  descending card id (true play recency is not recoverable from the public
-  observation vectors; the id ordering is a deterministic stand-in),
-- 5 context tokens (trump, phase, scores, points) plus the acting seat
-  carried as a context value.
+- up to 48 history tokens: every card from this hand's completed tricks in
+  reverse play order (most recent first), straight from the observation's
+  ``history`` slot,
+- 5 context tokens (trump, phase, tricks, points, seat).
+
+The history group deliberately spans the whole hand rather than the 13 most
+recent plays: which cards are gone is the central read in a trick-taking
+game, and truncating the group hides most of it. Forty-eight extra tokens
+cost nothing at this model size.
 
 Card tokens index a shared ``nn.Embedding(53, d_model)`` (52 cards + PAD).
 Context tokens are not cards: each carries a bounded integer feature value
@@ -21,18 +25,17 @@ Hand tokens get no positional embedding — the hand is a set.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 import numpy as np
 import torch as th
 
 from deephokm.cards import NUM_CARDS, PAD_TOKEN
-from deephokm.env.spaces import Observation
+from deephokm.env.spaces import HISTORY_SLOTS, Observation
 from deephokm.rules.state import NUM_SEATS, TRICKS_PER_HAND
 
 NUM_HAND_SLOTS = 13
 NUM_TRICK_SLOTS = NUM_SEATS
-NUM_HISTORY_SLOTS = 13
+NUM_HISTORY_SLOTS = HISTORY_SLOTS
 NUM_CONTEXT_TOKENS = 5
 MAX_TOKENS = NUM_HAND_SLOTS + NUM_TRICK_SLOTS + NUM_HISTORY_SLOTS + NUM_CONTEXT_TOKENS
 
@@ -88,10 +91,9 @@ class TokenizedObservation:
     padding_mask: th.Tensor
 
 
-def _set_ids(observation: Observation, key: Literal["hand", "seen"]) -> list[int]:
-    """Return the card ids where the binary vector ``key`` is set."""
-    vec = np.asarray(observation[key])
-    ids: list[int] = np.flatnonzero(vec).astype(np.int64).tolist()
+def _hand_ids(observation: Observation) -> list[int]:
+    """Return the card ids held in the acting player's hand."""
+    ids: list[int] = np.flatnonzero(np.asarray(observation["hand"])).astype(np.int64).tolist()
     return ids
 
 
@@ -142,8 +144,8 @@ def _context_values(observation: Observation) -> list[int]:
 def tokenize(observation: Observation) -> TokenizedObservation:
     """Tokenize a single observation into a batch of size 1.
 
-    Uses the same fixed slot layout as :func:`tokenize_tensor_batch`: hand at
-    columns 0-12, trick at 13-16, history at 17-29, context at 30-33.
+    Uses the same fixed slot layout as :func:`tokenize_tensor_batch`: hand
+    first, then the current trick, then history, then the context slots.
 
     Args:
         observation: The acting player's observation dict.
@@ -151,13 +153,12 @@ def tokenize(observation: Observation) -> TokenizedObservation:
     Returns:
         The padded token batch.
     """
-    hand = sorted(_set_ids(observation, "hand"))[:NUM_HAND_SLOTS]
+    hand = sorted(_hand_ids(observation))[:NUM_HAND_SLOTS]
     trick = _trick_play_order(observation)[:NUM_TRICK_SLOTS]
-    seen = _set_ids(observation, "seen")
-    # History holds cards from completed tricks only; the current trick has
-    # its own token group. Recency is approximated by descending card id.
-    trick_set = set(trick)
-    history = sorted(set(seen) - set(hand) - trick_set, reverse=True)[:NUM_HISTORY_SLOTS]
+    # History arrives already ordered (most recent completed-trick play
+    # first) and -1 padded.
+    raw_history = np.asarray(observation["history"])
+    history = [int(c) for c in raw_history[raw_history >= 0][:NUM_HISTORY_SLOTS]]
     context = _context_values(observation)
 
     tokens = [PAD_TOKEN] * MAX_TOKENS
@@ -201,8 +202,8 @@ def tokenize(observation: Observation) -> TokenizedObservation:
     )
 
 
-# Fixed column layout: hand at 0-12, trick at 13-16, history at 17-29, and
-# the context slots are always the last NUM_CONTEXT_TOKENS columns.
+# Fixed column layout: hand, then the current trick, then history; the
+# context slots are always the last NUM_CONTEXT_TOKENS columns.
 HAND_SLICE = slice(0, NUM_HAND_SLOTS)
 TRICK_SLICE = slice(NUM_HAND_SLOTS, NUM_HAND_SLOTS + NUM_TRICK_SLOTS)
 HISTORY_SLICE = slice(
@@ -250,12 +251,12 @@ def _binary_to_ids(mask: th.Tensor, limit: int | None) -> tuple[th.Tensor, th.Te
 
 
 def _batch_card_groups(
-    hand: th.Tensor, seen: th.Tensor, trick_play: th.Tensor
+    hand: th.Tensor, trick_play: th.Tensor, history: th.Tensor
 ) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
     """Compute per-row hand/trick/history card id tensors.
 
     Returns:
-        ``(hand_ids, n_hand, trick_ids, n_trick, history)`` where all id
+        ``(hand_ids, n_hand, trick_ids, n_trick, history_ids)`` where all id
         tensors are left-packed with PAD_TOKEN in unused slots.
     """
     device = hand.device
@@ -275,19 +276,10 @@ def _batch_card_groups(
     seq_valid = seq >= 0
     trick_ids, n_trick = _compact_left(th.where(seq_valid, seq, PAD_TOKEN), seq_valid)
 
-    # History: cards from completed tricks only (the current trick has its own
-    # token group). Recency is approximated by descending card id.
-    played_not_held = (seen > 0) & (hand == 0)
-    # Knock out the current trick's cards: a card column is a trick card
-    # when it equals some played entry. (scatter_ with clamped -1 indices is
-    # order-dependent and can erase a genuine card 0.)
-    card_columns = th.arange(seen.shape[1], device=device).view(1, -1)
-    in_trick = (seq.unsqueeze(-1) == card_columns.unsqueeze(1)) & seq_valid.unsqueeze(-1)
-    history_mask = played_not_held & ~in_trick.any(dim=1)
-    older, _ = _binary_to_ids(history_mask, None)
-    order = th.argsort(th.where(older == PAD_TOKEN, -1, older), dim=1, descending=True, stable=True)
-    history = th.gather(older, 1, order)[:, :NUM_HISTORY_SLOTS]
-    return hand_ids, n_hand, trick_ids, n_trick, history
+    # History arrives already ordered (most recent completed-trick play
+    # first) with -1 padding; only the padding value has to be remapped.
+    history_ids = th.where(history >= 0, history, PAD_TOKEN)[:, :NUM_HISTORY_SLOTS]
+    return hand_ids, n_hand, trick_ids, n_trick, history_ids
 
 
 def _batch_context(
@@ -316,7 +308,7 @@ def tokenize_tensor_batch(observations: dict[str, th.Tensor]) -> TokenizedObserv
     """Tokenize a dict of stacked observation tensors (the training hot path).
 
     Produces exactly the layout of :func:`tokenize` — hand cards ascending,
-    trick cards in play order, history most-recent-first, four context
+    trick cards in play order, history most-recent-first, five context
     values — without per-row Python work.
 
     Args:
@@ -327,8 +319,8 @@ def tokenize_tensor_batch(observations: dict[str, th.Tensor]) -> TokenizedObserv
         The padded token batch.
     """
     hand = observations["hand"].to(th.int64)
-    seen = observations["seen"].to(th.int64)
     trick_play = observations["trick_play"].to(th.int64)
+    history = observations["history"].to(th.int64)
     trump = observations["trump"].to(th.int64)
     phase = observations["phase"].to(th.int64)
     tricks_won = observations["tricks_won"].to(th.int64)
@@ -336,7 +328,9 @@ def tokenize_tensor_batch(observations: dict[str, th.Tensor]) -> TokenizedObserv
 
     n = hand.shape[0]
     device = hand.device
-    hand_ids, n_hand, trick_ids, n_trick, history = _batch_card_groups(hand, seen, trick_play)
+    hand_ids, n_hand, trick_ids, n_trick, history_ids = _batch_card_groups(
+        hand, trick_play, history
+    )
     seat = observations["seat"].to(th.int64)
     context_values = _batch_context(trump, phase, tricks_won, game_points, seat)
 
@@ -357,8 +351,8 @@ def tokenize_tensor_batch(observations: dict[str, th.Tensor]) -> TokenizedObserv
     type_ids[:, TRICK_SLICE] = th.where(trick_valid, TYPE_TRICK, TYPE_CONTEXT)
     positions[:, TRICK_SLICE] = th.where(trick_valid, th.arange(NUM_TRICK_SLOTS, device=device), 0)
 
-    hist_valid = history != PAD_TOKEN
-    tokens[:, HISTORY_SLICE] = history
+    hist_valid = history_ids != PAD_TOKEN
+    tokens[:, HISTORY_SLICE] = history_ids
     is_card[:, HISTORY_SLICE] = hist_valid
     type_ids[:, HISTORY_SLICE] = th.where(hist_valid, TYPE_HISTORY, TYPE_CONTEXT)
     positions[:, HISTORY_SLICE] = th.where(

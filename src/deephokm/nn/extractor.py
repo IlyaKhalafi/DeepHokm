@@ -34,14 +34,18 @@ class HokmTransformerExtractor(BaseFeaturesExtractor):
     """Transformer feature extractor over the Hokm Dict observation.
 
     The observation is tokenized into up to 13 hand tokens, up to 4 trick
-    tokens in play order, 13 recent-history tokens in recency order, and 4
-    context tokens (trump, phase, tricks, points). Card tokens share one
+    tokens in play order, up to 48 history tokens in recency order, and 5
+    context tokens (trump, phase, tricks, points, seat). Card tokens share one
     embedding table (52 cards + PAD); each context slot has its own embedding
     over its bounded value range. Learned type embeddings separate the four
     groups; learned positional embeddings mark order-sensitive slots (trick
     play order, history recency). Hand tokens carry no positional embedding —
     the hand is a set, so permuting hand tokens cannot change the pooled
     features.
+
+    The history group spans the whole hand rather than the 13 most recent
+    plays: knowing which cards are gone is the central read in a
+    trick-taking game, and truncation would hide most of it.
 
     The backbone is a pre-LayerNorm (``norm_first``) transformer encoder with
     bidirectional attention and a padding mask, followed by attention pooling

@@ -12,6 +12,7 @@ shaping.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
@@ -21,6 +22,7 @@ from deephokm.cards import NUM_CARDS, NUM_SUITS, Suit
 from deephokm.cards import card_name as _card_name
 from deephokm.env.masked_space import MaskedDiscrete
 from deephokm.env.spaces import (
+    HISTORY_SLOTS,
     Observation,
     observation_space,
 )
@@ -38,6 +40,9 @@ class HokmEnv(gym.Env[Observation, np.integer]):
     Attributes:
         seat: The learning seat.
         opponents: Policies for the other three seats, indexed by seat.
+        opponent_provider: Optional callable re-drawn on every ``reset()`` to
+            replace ``opponents``; self-play training uses it to pick a fresh
+            opponent mix per episode.
         trick_reward: Optional per-trick shaping magnitude (default 0).
         render_mode: ``"human"`` prints a trick log; ``None`` is silent.
     """
@@ -50,6 +55,7 @@ class HokmEnv(gym.Env[Observation, np.integer]):
         opponents: list[HokmPolicy] | None = None,
         trick_reward: float = 0.0,
         render_mode: str | None = None,
+        opponent_provider: Callable[[], list[HokmPolicy]] | None = None,
     ) -> None:
         """Create the environment.
 
@@ -60,6 +66,8 @@ class HokmEnv(gym.Env[Observation, np.integer]):
                 policies.
             trick_reward: Magnitude of optional +/- shaping per trick won/lost.
             render_mode: ``"human"`` or ``None``.
+            opponent_provider: Optional callable invoked on every ``reset()``
+                to draw a fresh length-4 opponent list.
 
         Raises:
             ValueError: If the seat is out of range or a mask bug surfaces.
@@ -82,6 +90,7 @@ class HokmEnv(gym.Env[Observation, np.integer]):
                 f"learner's entry is ignored), got {len(opponents)}"
             )
         self.opponents = list(opponents)
+        self.opponent_provider = opponent_provider
         self.trick_reward = trick_reward
         self.render_mode = render_mode
         self.action_space = MaskedDiscrete(NUM_ACTIONS, legal_provider=self._sample_legal_actions)
@@ -120,6 +129,7 @@ class HokmEnv(gym.Env[Observation, np.integer]):
         """
         super().reset(seed=seed)
         self._engine.start_match(seed=seed)
+        self._draw_opponents()
         self._reset_opponents(seed)
         self._terminated = False
         self._pending_reward = 0.0
@@ -127,6 +137,22 @@ class HokmEnv(gym.Env[Observation, np.integer]):
         obs, info = self._advance_to_learner()
         self._maybe_render_obs(obs)
         return obs, info
+
+    def _draw_opponents(self) -> None:
+        """Re-draw the opponent seats from the provider, when one is set.
+
+        Self-play training rotates the opponent mix per episode; without this
+        the policies chosen when the worker was created would be frozen for
+        the whole run.
+        """
+        if self.opponent_provider is None:
+            return
+        drawn = list(self.opponent_provider())
+        if len(drawn) != NUM_SEATS:
+            raise ValueError(
+                f"opponent_provider must return {NUM_SEATS} policies, got {len(drawn)}"
+            )
+        self.opponents = drawn
 
     def _reset_opponents(self, seed: int | None) -> None:
         """Restore per-episode determinism for stateful opponents.
@@ -174,6 +200,16 @@ class HokmEnv(gym.Env[Observation, np.integer]):
         self._terminated = terminated
         self._maybe_render_obs(obs)
         return obs, reward, terminated, False, info
+
+    @property
+    def engine(self) -> HokmEngine:
+        """Return the rules engine driving this environment.
+
+        The web UI and the evaluation harness read match state (score, phase,
+        winner) straight off the engine rather than reconstructing it from
+        observations; this is the supported accessor for that.
+        """
+        return self._engine
 
     def action_masks(self) -> np.ndarray:
         """Return the current action mask (sb3-contrib protocol)."""
@@ -283,6 +319,14 @@ class HokmEnv(gym.Env[Observation, np.integer]):
             trick[card] = 1
             trick_play[played_seat] = card
 
+        # Completed tricks only: the current trick has its own slot. Reverse
+        # play order puts the most recent card first, so a fixed slot always
+        # means the same recency regardless of how far the hand has run.
+        completed = len(hands.played) - len(hands.current_trick)
+        history = np.full(HISTORY_SLOTS, -1, dtype=np.int64)
+        recent = hands.played[:completed][::-1][:HISTORY_SLOTS]
+        history[: len(recent)] = recent
+
         trump = np.zeros(NUM_SUITS, dtype=np.int8)
         if hands.trump is not None:
             trump[hands.trump] = 1
@@ -312,6 +356,7 @@ class HokmEnv(gym.Env[Observation, np.integer]):
             seen=seen,
             trick=trick,
             trick_play=trick_play,
+            history=history,
             trump=trump,
             phase=phase,
             tricks_won=tricks_won,
