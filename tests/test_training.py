@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from deephokm.policies.random_policy import RandomPolicy
 from deephokm.rules.state import NUM_SEATS
 from deephokm.training.callbacks import GauntletCallback, SelfPlayCallback
 from deephokm.training.env_factory import make_env, make_vec_env
+from deephokm.training.gauntlet_workers import run_gauntlet_shards
 from deephokm.training.selfplay import SelfPlayPool
 from deephokm.training.train import build_config, hyperparameters, parse_args
 
@@ -264,4 +266,61 @@ def test_random_policy_reset_after_pool_use() -> None:
     first = play_episode()
     second = play_episode()
     assert first == second
+    env.close()
+
+
+def test_gauntlet_multiprocess_matches_serial(tmp_path: Path) -> None:
+    """The sharded gauntlet must equal the serial one and be worker-invariant."""
+
+    # Train a tiny model and save it.
+    env = make_env(rank=0, seed=0)
+    model = MaskablePPO(
+        HokmMaskablePolicy,
+        env,
+        n_steps=64,
+        batch_size=32,
+        n_epochs=1,
+        device="cpu",
+    )
+    model.learn(total_timesteps=128)
+    with tempfile.TemporaryDirectory() as tmp:
+        model_path = f"{tmp}/m.zip"
+        model.save(model_path)
+
+        w1 = run_gauntlet_shards(model_path, None, n_games=12, batch_size=4, n_workers=3, seed=1)
+        w2 = run_gauntlet_shards(model_path, None, n_games=12, batch_size=4, n_workers=3, seed=1)
+        w_serial = run_gauntlet_shards(
+            model_path, None, n_games=12, batch_size=4, n_workers=1, seed=1
+        )
+    assert w1 == w2, "same-seed gauntlet rounds must match"
+    assert w1 == w_serial, "worker count must not change results"
+    assert 0 <= w1 <= 12
+    env.close()
+
+
+def test_gauntlet_snapshot_round_runs(tmp_path: Path) -> None:
+    """A gauntlet round against a real snapshot file completes and reports."""
+
+    pool = SelfPlayPool(capacity=2, seed=0)
+    env = make_env(rank=0, seed=0)
+    model = MaskablePPO(
+        HokmMaskablePolicy,
+        env,
+        n_steps=64,
+        batch_size=32,
+        n_epochs=1,
+        device="cpu",
+    )
+    cb = SelfPlayCallback(pool=pool, save_freq=64, save_path=tmp_path / "opp")
+    model.learn(total_timesteps=128, callback=CallbackList([cb]))
+    snapshot = pool.latest()
+    assert snapshot is not None
+
+    with tempfile.TemporaryDirectory() as tmp:
+        model_path = f"{tmp}/m.zip"
+        model.save(model_path)
+        wins = run_gauntlet_shards(
+            model_path, str(snapshot.path), n_games=8, batch_size=4, n_workers=2, seed=0
+        )
+    assert 0 <= wins <= 8
     env.close()

@@ -135,9 +135,10 @@ class SnapshotPolicy:
     batch-1 tensors are latency-bound, not compute-bound).
     """
 
-    def __init__(self, policy: HokmMaskablePolicy) -> None:
+    def __init__(self, policy: HokmMaskablePolicy, path_str: str = "") -> None:
         self.policy = policy
         self.policy.eval()
+        self.path_str = path_str
 
     @staticmethod
     def _pin_single_thread() -> None:
@@ -153,7 +154,7 @@ class SnapshotPolicy:
         """Load a saved policy zip into a snapshot."""
         cls._pin_single_thread()
         policy = HokmMaskablePolicy.load(str(path), device="cpu")
-        return cls(policy)
+        return cls(policy, path_str=str(path))
 
     def reset(self, seed: int | None = None) -> None:
         """No-op: the snapshot policy is stateless across episodes."""

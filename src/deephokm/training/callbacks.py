@@ -9,6 +9,7 @@ evaluations and writes win rates to the TensorBoard log.
 
 from __future__ import annotations
 
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,8 @@ from stable_baselines3.common.callbacks import BaseCallback
 from deephokm.env.hokm_env import HokmEnv
 from deephokm.env.spaces import Observation
 from deephokm.rules.state import team_of
-from deephokm.training.selfplay import SelfPlayPool
+from deephokm.training.gauntlet_workers import run_gauntlet_shards
+from deephokm.training.selfplay import SelfPlayPool, SnapshotPolicy
 
 
 class SelfPlayCallback(BaseCallback):
@@ -90,6 +92,7 @@ class GauntletCallback(BaseCallback):
         n_games: int,
         eval_freq: int,
         batch_size: int = 32,
+        n_workers: int = 8,
         verbose: int = 0,
     ) -> None:
         """Create the callback.
@@ -99,7 +102,8 @@ class GauntletCallback(BaseCallback):
             opponents: Gauntlet name -> factory producing the opponent list.
             n_games: Games per gauntlet opponent per round.
             eval_freq: Steps between evaluation rounds.
-            batch_size: Environments advanced concurrently.
+            batch_size: Environments advanced concurrently per worker.
+            n_workers: Processes sharing a gauntlet round.
             verbose: SB3 verbosity.
         """
         super().__init__(verbose)
@@ -108,7 +112,9 @@ class GauntletCallback(BaseCallback):
         self.n_games = n_games
         self.eval_freq = eval_freq
         self.batch_size = batch_size
+        self.n_workers = n_workers
         self._last_eval_step = 0
+        self._eval_count = 0
 
     def _on_step(self) -> bool:
         """Run a gauntlet round when the cadence elapses."""
@@ -121,14 +127,31 @@ class GauntletCallback(BaseCallback):
         self._run_gauntlet()
 
     def _run_gauntlet(self) -> None:
-        """Play every gauntlet opponent and log win rates."""
-        for name, make_opponents in self.opponents.items():
-            wins = self._play_batch(name, make_opponents)
-            win_rate = wins / self.n_games
-            self.logger.record(f"gauntlet/{name}", win_rate)
-            if self.verbose:
-                print(f"[gauntlet] {name}: {win_rate:.3f} over {self.n_games} games")
+        """Play every gauntlet opponent and log win rates.
+
+        Rounds run in worker processes (each plays a shard of games with its
+        own batched loop and model copy) so a 100-game gauntlet costs a
+        fraction of the wall time it would take inside the training loop.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            model_path = str(Path(tmp) / "eval_model.zip")
+            self.model.save(model_path)
+            for name, make_opponents in self.opponents.items():
+                snapshot_path = _snapshot_path_of(make_opponents())
+                wins = run_gauntlet_shards(
+                    model_path=model_path,
+                    snapshot_path=snapshot_path,
+                    n_games=self.n_games,
+                    batch_size=self.batch_size,
+                    n_workers=self.n_workers,
+                    seed=self._eval_count,
+                )
+                win_rate = wins / self.n_games
+                self.logger.record(f"gauntlet/{name}", win_rate)
+                if self.verbose:
+                    print(f"[gauntlet] {name}: {win_rate:.3f} over {self.n_games} games")
         self._last_eval_step = self.num_timesteps
+        self._eval_count += 1
 
     def _play_batch(self, name: str, make_opponents: Callable[[], list[Any]]) -> int:
         """Play all games against one opponent, in parallel batches."""
@@ -189,3 +212,11 @@ class GauntletCallback(BaseCallback):
             for env in envs:
                 env.close()
         return sum(results)
+
+
+def _snapshot_path_of(opponents: list[Any]) -> str | None:
+    """Return the snapshot file the opponent list was built from, if any."""
+    for opponent in opponents:
+        if isinstance(opponent, SnapshotPolicy):
+            return opponent.path_str
+    return None
