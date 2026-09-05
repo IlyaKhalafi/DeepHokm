@@ -24,8 +24,6 @@ from deephokm.rules.legality import NUM_ACTIONS
 from deephokm.webui.serving import ServedPolicy, build_opponents, resolve_model_path
 from deephokm.webui.state import GameStore, apply_human_action, public_state
 
-DEFAULT_PORT = 8025
-
 _store = GameStore()
 _model_lock = threading.Lock()
 
@@ -69,7 +67,7 @@ def get_served() -> ServedPolicy | None:
     with _model_lock:
         if not hasattr(app.state, "model") and not getattr(app.state, "model_disabled", False):
             path = resolve_model_path()
-            if os.path.exists(path):
+            if os.path.isfile(path):
                 app.state.model = ServedPolicy(path)
             else:
                 app.state.model_disabled = True
@@ -120,9 +118,9 @@ def submit_action(game_id: str, request: ActionRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="spectate games take no actions")
     # One request at a time per game: the engine is shared mutable state.
     with record.lock:
-        if record.env._engine.state.winner is not None:
+        if record.env.engine.state.winner is not None:
             raise HTTPException(status_code=409, detail="game is over")
-        if record.env._engine.current_seat() != record.viewer_seat:
+        if record.env.engine.current_seat() != record.viewer_seat:
             raise HTTPException(status_code=409, detail="not the viewer's turn")
         try:
             apply_human_action(record, request.action)
@@ -142,8 +140,8 @@ def spectate_step(game_id: str) -> dict[str, Any]:
     env = record.env
     # One request at a time per game: the engine is shared mutable state.
     with record.lock:
-        if env._engine.state.winner is None:
-            seat = env._engine.current_seat()
+        if env.engine.state.winner is None:
+            seat = env.engine.current_seat()
             if seat == record.viewer_seat:
                 mask = env.action_masks()
                 obs = env._observation_for(seat)

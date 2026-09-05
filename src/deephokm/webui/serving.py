@@ -32,9 +32,13 @@ class ServedPolicy:
         """
         from sb3_contrib import MaskablePPO  # noqa: PLC0415
 
-        if not Path(model_path).exists():
+        # is_file(), not exists(): a bind mount whose host path is missing
+        # arrives as an empty directory, and MaskablePPO.load would fail on it
+        # with an opaque IsADirectoryError deep inside torch.
+        if not Path(model_path).is_file():
             raise FileNotFoundError(
-                f"model checkpoint not found at {model_path}; set DEEPHOKM_MODEL"
+                f"model checkpoint not found (or not a file) at {model_path}; "
+                "set DEEPHOKM_MODEL"
             )
         th.set_num_threads(1)
         self.model = MaskablePPO.load(model_path, device=device)

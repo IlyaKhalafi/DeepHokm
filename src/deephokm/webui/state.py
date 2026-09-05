@@ -99,7 +99,7 @@ def public_state(record: GameRecord) -> dict[str, Any]:
     hand — never another player's private cards.
     """
     env = record.env
-    engine = env._engine
+    engine = env.engine
     hands = engine.state.hands
     seat = record.viewer_seat
     current_seat = engine.current_seat() if engine.state.winner is None else -1

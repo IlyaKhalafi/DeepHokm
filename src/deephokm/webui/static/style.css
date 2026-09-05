@@ -262,6 +262,10 @@ footer {
 .banner.lose { border-color: var(--danger); color: var(--danger); }
 
 @media (max-width: 720px) {
+  /* The title and status text share one line at the desktop width; on a
+     narrow viewport that packs them edge to edge with no gap, so they stack
+     instead. */
+  header { flex-direction: column; align-items: flex-start; gap: 4px; }
   main { padding: 10px; }
   .table { min-height: 280px; grid-template-columns: 1fr; grid-template-rows: auto auto auto auto; }
   .seat-north, .seat-west, .seat-east, .seat-south { grid-column: 1; grid-row: auto; }

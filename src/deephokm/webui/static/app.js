@@ -5,6 +5,8 @@ const SUITS = ["♣", "♦", "♥", "♠"]; // clubs, diamonds, hearts, spades
 const SUIT_NAMES = ["Clubs", "Diamonds", "Hearts", "Spades"];
 const RED_SUITS = new Set([1, 2]);
 
+const AUTO_PLAY_MS = 900;
+
 let gameId = null;
 let state = null;
 let autoTimer = null;
@@ -48,7 +50,11 @@ async function api(path, options = {}) {
     let detail = `HTTP ${response.status}`;
     try {
       const body = await response.json();
-      detail = body.detail || detail;
+      // FastAPI returns a string detail for our own HTTPExceptions and an
+      // array of error objects for request-validation failures; only the
+      // string is safe to show as-is.
+      if (typeof body.detail === "string") detail = body.detail;
+      else if (Array.isArray(body.detail)) detail = "Invalid request";
     } catch (_) { /* keep default */ }
     throw new Error(detail);
   }
@@ -95,7 +101,8 @@ function render() {
     const won = state.winner === 0;
     banner.className = `banner ${won ? "win" : "lose"}`;
     banner.textContent = state.mode === "spectate"
-      ? `Match over — team ${state.winner} wins ${state.game_points[0]}–${state.game_points[1]}`
+      ? `Match over — team ${state.winner === 0 ? "A" : "B"} wins ` +
+        `${state.game_points[0]}–${state.game_points[1]}`
       : won
         ? `You win the match ${state.game_points[0]}–${state.game_points[1]}!`
         : `The model wins the match ${state.game_points[1]}–${state.game_points[0]}.`;
@@ -119,24 +126,29 @@ function render() {
       ? "Your turn"
       : `Seat ${state.current_seat} is playing…`;
   const phaseText = state.terminal
-    ? `final hand ${state.hand_number}`
+    ? `final hand #${state.hand_number}`
     : {
         TRUMP_CALL: "Trump selection",
         CARD_PLAY: "Card play",
         HAND_OVER: "Hand complete",
       }[state.phase] || state.phase;
+  // "#" disambiguates the hand's ordinal from a card count at a glance.
   $("phase").textContent = state.terminal
     ? phaseText
-    : `${phaseText} · hand ${state.hand_number}`;
+    : `${phaseText} · hand #${state.hand_number}`;
 
   // seats: highlight the active one
   for (let seat = 0; seat < 4; seat++) {
     $(`seat-${seat}`).classList.toggle("active", seat === state.current_seat);
     const holder = $(`cards-${seat}`);
     holder.innerHTML = "";
+    const label = $(`seat-${seat}`).querySelector(".seat-label");
     if (state.mode === "human" && seat === mine) {
       // The viewer's cards live in the bottom hand row; the seat slot stays
-      // visible with a count marker so the table cross reads complete.
+      // visible with a count marker so the table cross reads complete. The
+      // label still has to be written here: it carries the hakem marker, and
+      // a human hakem must be able to see they hold it.
+      label.textContent = `YOU${seat === state.hakem ? " · hakem" : ""} · your team`;
       if (!state.terminal && state.hand_counts[seat] > 0) {
         const marker = document.createElement("div");
         marker.className = "seat-count";
@@ -145,7 +157,6 @@ function render() {
       }
       continue;
     }
-    const label = $(`seat-${seat}`).querySelector(".seat-label");
     let seatName;
     if (state.mode === "spectate") {
       seatName = `Seat ${seat}`;
@@ -185,29 +196,36 @@ function render() {
     holder.appendChild(tag);
   }
 
+  // trick legend: only meaningful once this trick has a card on the table
+  // (leading a trick, trump selection, and match-over all show an empty
+  // table, where "led the trick" / "latest play" refer to nothing yet).
+  $("trick-legend").classList.toggle("hidden", state.table.length === 0);
+
   // hand: in spectate mode the API sends no private hand; the bottom row is
   // removed so the layout reads as a spectator view, not a missing player.
+  // At match end there is nothing left to play, so the row and its hint
+  // collapse entirely rather than reserving empty space for them.
   const handEl = $("hand");
   handEl.classList.toggle("spectate", state.mode === "spectate");
+  handEl.classList.toggle("hidden", state.terminal);
   let hint = document.querySelector(".hand-hint");
   if (!hint) {
     hint = document.createElement("div");
     hint.className = "hand-hint";
     handEl.after(hint);
   }
+  hint.classList.toggle("hidden", state.terminal);
   const playable = state.mode === "human" && !state.terminal
     ? state.legal_actions.filter((a) => a < 52).length
     : 0;
   hint.textContent =
     state.mode === "spectate"
       ? ""
-      : state.terminal
-        ? ""
-        : playable > 0
-          ? `${playable} playable — highlighted cards`
-          : state.phase === "TRUMP_CALL"
-            ? "choose trump above"
-            : "waiting for other players";
+      : playable > 0
+        ? `${playable} playable — highlighted cards`
+        : state.phase === "TRUMP_CALL"
+          ? "choose trump above"
+          : "waiting for other players";
   handEl.innerHTML = "";
   const myTurn = !state.terminal && state.current_seat === mine;
   const legalSet = new Set(state.legal_actions);
@@ -291,22 +309,31 @@ async function spectateStep() {
   }
 }
 
+function stopAuto() {
+  if (autoTimer) clearTimeout(autoTimer);
+  autoTimer = null;
+  $("auto").textContent = "Auto-play";
+}
+
 function toggleAuto() {
   if (autoTimer) {
-    clearInterval(autoTimer);
-    autoTimer = null;
-    $("auto").textContent = "Auto-play";
+    stopAuto();
     return;
   }
   $("auto").textContent = "Stop";
-  autoTimer = setInterval(async () => {
+  // Chained timeouts, not setInterval: one model decision can take longer
+  // than the tick, and overlapping requests would queue up behind the
+  // server's per-game lock.
+  const tick = async () => {
     await spectateStep();
+    if (!autoTimer) return;
     if (state && state.terminal) {
-      clearInterval(autoTimer);
-      autoTimer = null;
-      $("auto").textContent = "Auto-play";
+      stopAuto();
+      return;
     }
-  }, 900);
+    autoTimer = setTimeout(tick, AUTO_PLAY_MS);
+  };
+  autoTimer = setTimeout(tick, AUTO_PLAY_MS);
 }
 
 // Test/QA hook: render an externally fetched state through the same renderer
@@ -324,7 +351,7 @@ window.__deephokmRender = (externalState) => {
 document.addEventListener("DOMContentLoaded", () => {
   $("start").addEventListener("click", startGame);
   $("newgame").addEventListener("click", () => {
-    if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+    stopAuto();
     $("game").classList.add("hidden");
     $("setup").classList.remove("hidden");
     setStatus("Ready");
