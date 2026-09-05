@@ -14,6 +14,7 @@ other three, its own partner seat included. That is the honest reading of
 from __future__ import annotations
 
 import multiprocessing
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,6 @@ from deephokm.env.hokm_env import HokmEnv
 from deephokm.policies.greedy_policy import GreedyPolicy
 from deephokm.policies.random_policy import RandomPolicy
 from deephokm.rules.state import NUM_SEATS, team_of
-from deephokm.training.env_factory import make_env
 from deephokm.training.selfplay import SnapshotPolicy
 
 # Match seeds are laid out round by round with this stride, so two rounds
@@ -71,6 +71,22 @@ def match_seed(round_seed: int, index: int) -> int:
     return round_seed * GAMES_PER_ROUND_STRIDE + index
 
 
+def _pin_thread_if_unset() -> None:
+    """Limit torch to one CPU thread unless the user pinned a count.
+
+    ``run_gauntlet_shards`` calls ``_play_shard`` directly, in-process,
+    whenever a round collapses to a single shard (``--eval-workers 1``, or
+    fewer games than workers). Unlike the spawned-subprocess path, that
+    process may be the training process itself, so an unconditional
+    ``torch.set_num_threads(1)`` would silently override whatever thread
+    count the user configured for training — pinned env vars always win.
+    """
+    if torch.get_num_threads() > 1 and not any(
+        os.environ.get(var) for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "TORCH_NUM_THREADS")
+    ):
+        torch.set_num_threads(1)
+
+
 def _play_shard(
     model_path: str,
     spec: OpponentSpec,
@@ -85,14 +101,20 @@ def _play_shard(
     depends on the round and the game index but never on which worker drew
     it — rounds are independent samples and shard layout does not change the
     result.
+
+    A single-shard round runs this function directly in the caller's own
+    process rather than a spawned subprocess (see ``run_gauntlet_shards``),
+    so nothing here may touch process-global state the caller depends on:
+    every prediction is deterministic (argmax, no sampling), so the model's
+    own RNG is never seeded here, and the thread count is only pinned when
+    unset.
     """
-    torch.set_num_threads(1)
+    _pin_thread_if_unset()
 
     model = MaskablePPO.load(model_path, device="cpu")
-    model.set_random_seed(0)
 
-    env = make_env(rank=0, seed=10_000 + round_seed)
-    env.opponents = spec.build()
+    opponents = spec.build()
+    env = HokmEnv(seat=0, opponents=opponents)
 
     wins = 0
     for index in game_indices:

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import tempfile
 from collections import Counter
 from pathlib import Path
 
 import numpy as np
+import torch
 from sb3_contrib import MaskablePPO
 from stable_baselines3.common.callbacks import CallbackList
 from stable_baselines3.common.logger import KVWriter, Logger
@@ -426,6 +428,78 @@ def test_gauntlet_multiprocess_matches_serial() -> None:
     assert w1 == w2, "same-seed gauntlet rounds must match"
     assert w1 == w_serial, "worker count must not change results"
     assert 0 <= w1 <= 12
+    env.close()
+
+
+def test_single_shard_gauntlet_does_not_reseed_the_global_rng() -> None:
+    """A single-shard round runs in-process; it must not reseed torch's RNG.
+
+    Regression test: ``_play_shard`` used to call ``model.set_random_seed(0)``
+    unconditionally. That call reseeds the *global* python/numpy/torch RNGs to
+    a fixed value (not just the loaded eval model's own state), which is
+    harmless when the round runs in a spawned subprocess but collapses the
+    training process's own rollout sampling onto a fixed, repeating stream
+    whenever a round runs directly in the training process instead (a round
+    collapses to one shard with ``--eval-workers 1``, or fewer games than
+    workers). Every gauntlet prediction is already ``deterministic=True``, so
+    no RNG seeding was ever needed here.
+
+    Loading a fresh policy for evaluation does perturb the global RNG somewhat
+    (network construction draws from it before the saved weights overwrite
+    them), so the property under test is not "unchanged" but "still depends on
+    what the caller's RNG was doing beforehand" -- under the bug, two
+    differently-seeded callers converged on the exact same post-call state.
+    """
+    env = make_env(rank=0, seed=0)
+    model = tiny_model(env)
+    model.learn(total_timesteps=64)
+    spec = OpponentSpec(kind="random")
+    with tempfile.TemporaryDirectory() as tmp:
+        model_path = f"{tmp}/m.zip"
+        model.save(model_path)
+
+        torch.manual_seed(111)
+        run_gauntlet_shards(model_path, spec, n_games=4, n_workers=1, seed=7)
+        after_a = torch.rand(8)
+
+        torch.manual_seed(222)
+        run_gauntlet_shards(model_path, spec, n_games=4, n_workers=1, seed=7)
+        after_b = torch.rand(8)
+    assert not torch.equal(after_a, after_b), (
+        "two differently-seeded callers must not converge on the same RNG "
+        "state after a single-shard gauntlet round"
+    )
+    env.close()
+
+
+def test_single_shard_gauntlet_respects_pinned_thread_count() -> None:
+    """The in-process single-shard path must not override a pinned thread count.
+
+    Regression test: ``_play_shard`` used to call ``torch.set_num_threads(1)``
+    unconditionally, which silently overrode a thread count the user pinned
+    via an environment variable for the training process itself whenever a
+    round ran in-process.
+    """
+    env = make_env(rank=0, seed=0)
+    model = tiny_model(env)
+    model.learn(total_timesteps=64)
+    spec = OpponentSpec(kind="random")
+    original = os.environ.get("OMP_NUM_THREADS")
+    original_threads = torch.get_num_threads()
+    try:
+        os.environ["OMP_NUM_THREADS"] = "1"
+        torch.set_num_threads(4)
+        with tempfile.TemporaryDirectory() as tmp:
+            model_path = f"{tmp}/m.zip"
+            model.save(model_path)
+            run_gauntlet_shards(model_path, spec, n_games=4, n_workers=1, seed=8)
+        assert torch.get_num_threads() == 4, "a pinned thread count must not be overridden"
+    finally:
+        if original is None:
+            os.environ.pop("OMP_NUM_THREADS", None)
+        else:
+            os.environ["OMP_NUM_THREADS"] = original
+        torch.set_num_threads(original_threads)
     env.close()
 
 
