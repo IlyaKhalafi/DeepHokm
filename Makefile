@@ -18,7 +18,7 @@ endif
 
 ARGS ?=
 
-.PHONY: help test lint format bench
+.PHONY: help test lint format bench train plot
 
 help:  ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -36,3 +36,9 @@ format:  ## Apply ruff formatting and lint fixes
 
 bench:  ## Benchmark environment throughput
 	uv run python scripts/bench_env.py
+
+train:  ## Run self-play training (extra flags via ARGS="...")
+	uv run python -m deephokm.training.train $(ARGS)
+
+plot:  ## Render training figures from TensorBoard logs
+	uv run python scripts/plot_results.py $(ARGS)

@@ -90,6 +90,25 @@ checker assertion runs against the bare environment.
 Benchmark: `make bench` (mask-respecting random play, ~10k learner steps/s
 per worker on this machine).
 
+## Network
+
+`HokmTransformerExtractor` tokenizes the Dict observation into a fixed
+34-token layout: up to 13 hand tokens (no positional embedding — the hand is
+a set), up to 4 trick tokens in play order, 13 history tokens (completed
+tricks, most recent first), and 4 context tokens (trump, phase, tricks,
+points) each with its own value embedding. Cards share one `Embedding(53, 128)`
+(52 cards + PAD). Learned type embeddings separate the four groups; learned
+positional embeddings mark order-sensitive slots. A pre-LayerNorm
+`TransformerEncoder` (d_model=128, 4 heads, 3 layers, FFN 512, GELU, dropout
+0) runs bidirectional attention with a padding mask, and a single learned
+query attention-pools the real tokens. ~640k parameters, far under the 2M cap.
+
+`HokmMaskablePolicy` binds the extractor to sb3-contrib's
+`MaskableActorCriticPolicy` with the default `net_arch=[]` so the pooled
+features feed the actor and value heads directly; orthogonal init runs with
+gain 0.01 on the action head and 1.0 on the value head. Logit masking is
+handled entirely by `MaskablePPO`.
+
 ## Training
 
 Documented once the training CLI lands.
