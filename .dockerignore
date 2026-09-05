@@ -1,0 +1,22 @@
+# Never copy instruction sheets, machine-local values, or build outputs.
+CLAUDE.md
+REVIEW_LOG.local.md
+*.local.md
+tests/
+.env
+.venv
+.git
+.gitignore
+logs/
+checkpoints/*
+!checkpoints/final.zip
+figures/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+htmlcov/
+.coverage
+docker-compose.yml
+Dockerfile
+.dockerignore

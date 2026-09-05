@@ -85,7 +85,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=deephokm --cov-report=term-missing --cov-branch -q"
+addopts = "--cov=deephokm --cov-report=term-missing --cov-branch --cov-fail-under=80 -q"
 filterwarnings = [
     "ignore::DeprecationWarning:gymnasium.*",
     # The env checker warns about any wrapper; our test-local legality shim is

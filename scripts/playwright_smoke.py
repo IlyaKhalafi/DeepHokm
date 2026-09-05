@@ -1,7 +1,7 @@
 """Playwright smoke test: the web UI loads, starts a game, and renders state.
 
 Run with the web UI already listening (``make webui``) — the target URL comes
-from ``DEEPHOKM_BASE_URL`` (default ``http://127.0.0.1:8025``).
+from ``DEEPHOKM_BASE_URL`` (see .env.example for the documented default).
 """
 
 from __future__ import annotations
@@ -11,12 +11,18 @@ import sys
 
 from playwright.sync_api import sync_playwright
 
-BASE_URL = os.environ.get("DEEPHOKM_BASE_URL", "http://127.0.0.1:8025")
+BASE_URL = os.environ.get("DEEPHOKM_BASE_URL", "")
 CARDS_PER_HAND = 13
 
 
 def main() -> int:
     """Load the page, start a human game, assert the key UI elements appear."""
+    if not BASE_URL:
+        print(
+            "DEEPHOKM_BASE_URL is not set; copy .env.example to .env first",
+            file=sys.stderr,
+        )
+        return 2
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = browser.new_page(viewport={"width": 1440, "height": 900})

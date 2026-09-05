@@ -1,0 +1,37 @@
+# DeepHokm web UI + model serving. Every deployment-specific value is
+# interpolated from the environment (.env by default); nothing is hardcoded.
+# See .env.example for the documented configuration surface.
+
+services:
+  webui:
+    build:
+      context: .
+      args:
+        MODEL_PATH: ${DEEPHOKM_MODEL:-checkpoints/final.zip}
+    image: deephokm-web:latest
+    ports:
+      - "${DEEPHOKM_PORT}:${DEEPHOKM_PORT}"
+    environment:
+      DEEPHOKM_PORT: ${DEEPHOKM_PORT}
+      DEEPHOKM_MODEL: /app/checkpoints/final.zip
+    env_file:
+      - .env
+    # The service is stateless: it loads a checkpoint and serves. Giving it a
+    # RAM-backed /tmp keeps torch's scratch directories off the host disk, so
+    # a full host filesystem cannot stop the container from starting.
+    tmpfs:
+      - /tmp
+    volumes:
+      # Host checkpoint mounted read-only over the baked-in one, so a new
+      # model can be served without rebuilding. The default is the repository
+      # checkpoint the image was built from, which makes the mount a no-op
+      # rather than a requirement; relative paths resolve against this file.
+      - ${DEEPHOKM_MODEL_PATH:-./checkpoints/final.zip}:/app/checkpoints/final.zip:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${DEEPHOKM_GPU_DEVICE_ID}"]
+              capabilities: [gpu]
+    restart: unless-stopped
