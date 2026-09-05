@@ -8,10 +8,13 @@ import sys
 
 import numpy as np
 
+from deephokm.env.hokm_env import HokmEnv
 from deephokm.env.spaces import Observation, empty_observation
+from deephokm.policies.greedy_policy import GreedyPolicy
 from deephokm.policies.random_policy import RandomPolicy
 from deephokm.rules import HokmEngine
 from deephokm.rules.legality import NUM_ACTIONS
+from deephokm.rules.state import team_of
 
 
 def _mask(actions: list[int]) -> np.ndarray:
@@ -110,3 +113,91 @@ def test_policy_modules_import_without_env_first() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "ok" in result.stdout
+
+
+def _greedy_obs(
+    hand: list[int],
+    *,
+    seat: int = 0,
+    trump: int | None = None,
+    trick_play: dict[int, int] | None = None,
+) -> Observation:
+    """Build a minimal observation for the greedy policy's decisions."""
+    obs = empty_observation()
+    obs["hand"][hand] = 1
+    obs["seen"][hand] = 1
+    obs["seat"][seat] = 1
+    obs["phase"][1] = 1
+    if trump is not None:
+        obs["trump"][trump] = 1
+    for played_seat, card in (trick_play or {}).items():
+        obs["trick_play"][played_seat] = card
+        obs["trick"][card] = 1
+        obs["seen"][card] = 1
+    return obs
+
+
+def test_greedy_policy_only_returns_masked_actions() -> None:
+    policy = GreedyPolicy()
+    engine = HokmEngine()
+    engine.start_match(seed=11)
+    steps = 0
+    while engine.state.winner is None and steps < 400:
+        seat = engine.current_seat()
+        legal = engine.legal_actions(seat)
+        obs = _obs()
+        action = policy.act(obs, _mask(legal)) if legal else None
+        assert action is None or action in legal
+        engine.apply_action(action if action is not None else legal[0])
+        steps += 1
+
+
+def test_greedy_policy_calls_its_longest_suit() -> None:
+    """Six clubs against three of everything else: clubs is the call."""
+    policy = GreedyPolicy()
+    hand = [0, 1, 2, 3, 4, 5] + [13, 14, 15] + [26, 27, 28] + [39]
+    obs = _greedy_obs(hand)
+    obs["phase"][:] = 0
+    obs["phase"][0] = 1
+    action = policy.act(obs, _mask([52, 53, 54, 55]))
+    assert action == 52, "clubs (suit 0) is the longest suit held"
+
+
+def test_greedy_policy_wins_the_trick_as_cheaply_as_possible() -> None:
+    """Holding the 10 and the ace of the led suit, play the 10."""
+    policy = GreedyPolicy()
+    # Led: clubs 9 (rank index 7 -> card 7) by seat 3, so seat 0 is next and
+    # its partner (seat 2) has not played.
+    hand = [8, 12, 20]  # clubs 10, clubs ace, diamonds 9
+    obs = _greedy_obs(hand, seat=0, trump=3, trick_play={3: 7})
+    action = policy.act(obs, _mask([8, 12]))
+    assert action == 8, "the cheapest winner, not the ace"
+
+
+def test_greedy_policy_lets_its_partner_win() -> None:
+    """The partner already leads the trick: throw the lowest card."""
+    policy = GreedyPolicy()
+    hand = [8, 12]
+    # Seat 2 (the partner) led clubs ace; seat 3 followed with clubs 3.
+    obs = _greedy_obs(hand, seat=0, trump=3, trick_play={2: 12 - 0, 3: 1})
+    obs["trick_play"][2] = 11  # clubs king leads the trick
+    action = policy.act(obs, _mask([8, 12]))
+    assert action == 8, "keep the ace while the partner is winning"
+
+
+def test_greedy_policy_beats_random_by_a_wide_margin() -> None:
+    """The scripted baseline must be a meaningfully stronger yardstick."""
+    wins = 0
+    games = 40
+    learner = GreedyPolicy()
+    for game in range(games):
+        env = HokmEnv(seat=0, opponents=[RandomPolicy(200 + i) for i in range(4)])
+        obs, info = env.reset(seed=game)
+        done = False
+        while not done:
+            action = learner.act(obs, np.asarray(info["action_mask"], dtype=bool))
+            obs, _reward, terminated, truncated, info = env.step(np.int64(action))
+            done = terminated or truncated
+        wins += int(env.engine.state.winner == team_of(0))
+        env.close()
+    assert wins / games > 0.8, f"greedy won only {wins}/{games} against random play"

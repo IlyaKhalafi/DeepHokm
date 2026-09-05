@@ -1,0 +1,139 @@
+"""A scripted greedy Hokm baseline.
+
+The policy plays the obvious lines a competent human plays without any
+lookahead, which makes it a far more informative yardstick than uniform
+random play: it calls its longest, strongest suit for trump, wins tricks as
+cheaply as it can, and throws its lowest card when it cannot win or when its
+partner is already winning.
+
+It reads only the observation and the action mask, exactly like every other
+:class:`~deephokm.policies.base.HokmPolicy`, so it can play any seat without
+seeing hidden hands.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+
+import numpy as np
+
+from deephokm.cards import NUM_RANKS, NUM_SUITS
+from deephokm.env.spaces import Observation
+from deephokm.rules.legality import TRUMP_ACTION_OFFSET
+from deephokm.rules.state import NUM_SEATS
+
+
+def _suit_of(card: int) -> int:
+    """Return the suit id of a card id."""
+    return card // NUM_RANKS
+
+
+def _rank_of(card: int) -> int:
+    """Return the rank index (0 = two, 12 = ace) of a card id."""
+    return card % NUM_RANKS
+
+
+class GreedyPolicy:
+    """Scripted greedy play: cheapest win, lowest discard, longest trump.
+
+    Trump call: score each suit by its length plus a small bonus for high
+    cards, and declare the best. Card play: if a partner is already winning
+    the trick, discard the lowest legal card; otherwise play the cheapest
+    card that beats the current best, and the lowest legal card when nothing
+    beats it. Leading, play the highest card of the longest suit held.
+
+    The policy is deterministic: every choice is a total order over the legal
+    cards, so there is nothing to seed and four greedy seats play identically.
+    """
+
+    def reset(self, seed: int | None = None) -> None:
+        """No-op: the policy is deterministic and carries no episode state."""
+
+    def act(self, observation: Observation, action_mask: np.ndarray) -> int:
+        """Return the greedy legal action for the observation."""
+        legal = np.flatnonzero(np.asarray(action_mask))
+        if legal.size == 0:
+            raise ValueError("action mask has no legal actions")
+        if legal[0] >= TRUMP_ACTION_OFFSET:
+            return self._call_trump(observation)
+        return self._play_card(observation, [int(a) for a in legal])
+
+    def _call_trump(self, observation: Observation) -> int:
+        """Declare the longest suit, tie-broken by high-card strength."""
+        hand = np.flatnonzero(np.asarray(observation["hand"]))
+        strength = [0.0] * NUM_SUITS
+        for card in hand:
+            # Length dominates; the rank term only separates equal lengths.
+            strength[_suit_of(int(card))] += 1.0 + _rank_of(int(card)) / (2 * NUM_RANKS)
+        best = int(np.argmax(strength))
+        return TRUMP_ACTION_OFFSET + best
+
+    def _play_card(self, observation: Observation, legal: list[int]) -> int:
+        """Choose a card: cheapest win, or lowest discard."""
+        trump_vec = np.asarray(observation["trump"])
+        trump = int(np.argmax(trump_vec)) if trump_vec.sum() else None
+        trick_play = np.asarray(observation["trick_play"])
+        seat = int(np.argmax(np.asarray(observation["seat"])))
+
+        played = [(s, int(trick_play[s])) for s in range(NUM_SEATS) if trick_play[s] >= 0]
+        if not played:
+            return self._lead(legal)
+
+        best_seat, best_card = self._current_best(played, trump)
+        if (best_seat % 2) == (seat % 2):
+            # The partner is winning: keep high cards, throw the lowest.
+            return min(legal, key=self._discard_key(trump))
+        winners = [c for c in legal if self._beats(c, best_card, trump)]
+        if winners:
+            return min(winners, key=self._discard_key(trump))
+        return min(legal, key=self._discard_key(trump))
+
+    def _lead(self, legal: list[int]) -> int:
+        """Lead the highest card of the longest suit held."""
+        counts = [0] * NUM_SUITS
+        for card in legal:
+            counts[_suit_of(card)] += 1
+        best_suit = max(range(NUM_SUITS), key=lambda s: (counts[s], s))
+        candidates = [c for c in legal if _suit_of(c) == best_suit]
+        return max(candidates, key=_rank_of)
+
+    @staticmethod
+    def _current_best(played: list[tuple[int, int]], trump: int | None) -> tuple[int, int]:
+        """Return the ``(seat, card)`` currently winning the partial trick.
+
+        ``played`` is in seat order, which is not play order, so the led suit
+        is taken from the seat that led — the played seat whose predecessor
+        has not played.
+        """
+        seats = {s for s, _ in played}
+        leader = next(s for s, _ in played if (s - 1) % NUM_SEATS not in seats)
+        order = [
+            (s, card) for s, card in sorted(played, key=lambda sc: (sc[0] - leader) % NUM_SEATS)
+        ]
+        best_seat, best_card = order[0]
+        for s, card in order[1:]:
+            if GreedyPolicy._beats(card, best_card, trump):
+                best_seat, best_card = s, card
+        return best_seat, best_card
+
+    @staticmethod
+    def _beats(card: int, best: int, trump: int | None) -> bool:
+        """Return whether ``card`` beats the trick's current best card."""
+        suit, best_suit = _suit_of(card), _suit_of(best)
+        is_trump = trump is not None and suit == trump
+        best_is_trump = trump is not None and best_suit == trump
+        if is_trump and not best_is_trump:
+            return True
+        if is_trump == best_is_trump and suit == best_suit:
+            return card > best
+        return False
+
+    @staticmethod
+    def _discard_key(trump: int | None) -> Callable[[int], tuple[int, int]]:
+        """Return a sort key ordering cards cheapest-first, trumps last."""
+
+        def key(card: int) -> tuple[int, int]:
+            is_trump = 1 if trump is not None and _suit_of(card) == trump else 0
+            return (is_trump, _rank_of(card))
+
+        return key
