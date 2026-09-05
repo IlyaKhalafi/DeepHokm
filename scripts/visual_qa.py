@@ -7,7 +7,9 @@ with an adversarial prompt. Findings are printed and written to the log
 directory for triage; the exit code is 0 only when every capture returns
 CLEAN on both dimensions (bug-free and well-designed).
 
-Endpoint and model come from DEEPHOKM_VLM_BASE_URL / DEEPHOKM_VLM_MODEL.
+The UI address comes from DEEPHOKM_BASE_URL and the reviewer endpoint and
+model from DEEPHOKM_VLM_BASE_URL / DEEPHOKM_VLM_MODEL; see .env.example,
+which is the only place those defaults live.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import json
 import os
 import struct
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 import zlib
@@ -26,7 +29,6 @@ from typing import Any
 
 from playwright.sync_api import sync_playwright
 
-DEFAULT_BASE_URL = "http://127.0.0.1:8025"
 DEFAULT_LOG_DIR = Path("logs/visual_qa")
 
 VIEWPORTS = {
@@ -48,17 +50,15 @@ the concrete defect or improvement; output exactly `CLEAN` only if the UI is \
 bug-free AND well-designed."""
 
 
-def api(base_url: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Call the web UI REST API."""
-    data = json.dumps(body or {}).encode()
-    request = urllib.request.Request(
-        base_url.rstrip("/") + path,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST" if body is not None else "GET",
-    )
-    with urllib.request.urlopen(request, timeout=60) as response:
-        return json.load(response)
+def verdict_is_clean(verdict: str) -> bool:
+    """Return whether a reviewer verdict is the exact CLEAN token.
+
+    The prompt asks for the bare word and nothing else. Anything looser — a
+    suffix or substring match — passes verdicts such as "the trump indicator
+    is clipped, so the UI is not CLEAN", which would let a failing pass be
+    recorded as clean.
+    """
+    return verdict.strip() == "CLEAN"
 
 
 TARGET_STATES = [
@@ -203,7 +203,7 @@ def review_screenshot(image_path: Path, vlm_base_url: str, vlm_model: str, max_t
 def main() -> int:
     """Run capture -> review for every state; exit 0 only if all CLEAN."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-url", default=os.environ.get("DEEPHOKM_BASE_URL", DEFAULT_BASE_URL))
+    parser.add_argument("--base-url", default=os.environ.get("DEEPHOKM_BASE_URL", ""))
     parser.add_argument("--vlm-base-url", default=os.environ.get("DEEPHOKM_VLM_BASE_URL", ""))
     parser.add_argument("--vlm-model", default=os.environ.get("DEEPHOKM_VLM_MODEL", ""))
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_LOG_DIR)
@@ -211,6 +211,12 @@ def main() -> int:
     parser.add_argument("--probe-only", action="store_true")
     args = parser.parse_args()
 
+    if not args.base_url:
+        print(
+            "DEEPHOKM_BASE_URL is not set; copy .env.example to .env or pass --base-url",
+            file=sys.stderr,
+        )
+        return 2
     if not args.vlm_base_url or not args.vlm_model:
         raise SystemExit("set DEEPHOKM_VLM_BASE_URL and DEEPHOKM_VLM_MODEL (see .env.example)")
 
@@ -219,11 +225,13 @@ def main() -> int:
     # Probe the endpoint with a tiny generated image first: the spec requires
     # confirming the reviewer accepts image content parts before the loop.
     if args.probe_only:
-        tiny = Path(__file__).parent / "_probe.png"
-        tiny.write_bytes(_tiny_png())
-        verdict = review_screenshot(tiny, args.vlm_base_url, args.vlm_model, 60)
+        # The probe image is a build artifact, not source: keep it in a
+        # temporary directory that is removed however the review ends.
+        with tempfile.TemporaryDirectory() as tmp:
+            tiny = Path(tmp) / "probe.png"
+            tiny.write_bytes(_tiny_png())
+            verdict = review_screenshot(tiny, args.vlm_base_url, args.vlm_model, 60)
         print("probe response:", verdict[:200])
-        tiny.unlink()
         if "red" not in verdict.lower():
             print("WARNING: reviewer did not identify the probe image")
         return 0
@@ -244,7 +252,7 @@ def main() -> int:
             findings[path.name] = f"REVIEW ERROR: {exc}"
             continue
         findings[path.name] = verdict
-        is_clean = verdict.strip().endswith("CLEAN") or verdict.strip() == "CLEAN"
+        is_clean = verdict_is_clean(verdict)
         if not is_clean:
             all_clean = False
         print(f"  {'CLEAN' if is_clean else 'FINDINGS'}")
