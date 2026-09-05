@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeepHokm</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>Deep<span class="accent">Hokm</span></h1>
+  <div id="status" class="status">Ready</div>
+</header>
+
+<main>
+  <section id="setup" class="panel">
+    <h2>New game</h2>
+    <div class="row">
+      <label for="mode">Mode</label>
+      <select id="mode">
+        <option value="human" selected>Play against the model</option>
+        <option value="spectate">Spectate AI vs AI</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="seed">Seed <span class="muted">(optional)</span></label>
+      <input id="seed" type="number" min="0" max="2147483647" placeholder="random">
+    </div>
+    <button id="start">Start game</button>
+  </section>
+
+  <section id="game" class="panel hidden">
+    <div class="scorebar">
+      <div class="score" id="score-us">
+        <div class="score-title">Your team</div>
+        <div class="score-value"><span id="points-us">0</span><span class="sep">·</span><span id="tricks-us">0</span></div>
+        <div class="score-sub">game points · tricks</div>
+      </div>
+      <div class="center-info">
+        <div id="trump" class="trump">Trump: —</div>
+        <div id="turn" class="turn">—</div>
+        <div id="phase" class="phase">—</div>
+      </div>
+      <div class="score" id="score-them">
+        <div class="score-title">Opponents</div>
+        <div class="score-value"><span id="points-them">0</span><span class="sep">·</span><span id="tricks-them">0</span></div>
+        <div class="score-sub">game points · tricks</div>
+      </div>
+    </div>
+
+    <div id="table" class="table">
+      <div class="seat seat-north" id="seat-2"><div class="seat-label">Seat 2 (partner)</div><div class="seat-cards" id="cards-2"></div></div>
+      <div class="seat seat-west" id="seat-1"><div class="seat-label">Seat 1</div><div class="seat-cards" id="cards-1"></div></div>
+      <div class="seat seat-east" id="seat-3"><div class="seat-label">Seat 3</div><div class="seat-cards" id="cards-3"></div></div>
+      <div class="seat seat-south" id="seat-0"><div class="seat-label">Seat 0 (you)</div><div class="seat-cards" id="cards-0"></div></div>
+    </div>
+
+    <div id="trump-picker" class="trump-picker hidden">
+      <div class="picker-title">You are the <strong>hakem</strong> — choose trump:</div>
+      <div class="picker-options">
+        <button class="trump-btn" data-suit="0">&#9827; Clubs</button>
+        <button class="trump-btn" data-suit="1">&#9830; Diamonds</button>
+        <button class="trump-btn" data-suit="2">&#9829; Hearts</button>
+        <button class="trump-btn" data-suit="3">&#9824; Spades</button>
+      </div>
+    </div>
+
+    <div id="hand" class="hand" aria-label="Your hand"></div>
+
+    <div class="controls">
+      <button id="step" class="ghost">Advance one play</button>
+      <button id="auto" class="ghost">Auto-play</button>
+      <button id="newgame" class="ghost">New game</button>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div>DeepHokm — reinforcement-learned Hokm. First team to 7 game points wins.</div>
+</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>

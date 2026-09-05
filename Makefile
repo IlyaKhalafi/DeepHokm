@@ -18,7 +18,7 @@ endif
 
 ARGS ?=
 
-.PHONY: help test lint format bench train plot
+.PHONY: help test lint format bench train plot webui
 
 help:  ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -42,3 +42,6 @@ train:  ## Run self-play training (extra flags via ARGS="...")
 
 plot:  ## Render training figures from TensorBoard logs
 	uv run python scripts/plot_results.py $(ARGS)
+
+webui:  ## Run the web UI (serves the trained model)
+	uv run uvicorn deephokm.webui.app:app --host 0.0.0.0 --port "$${DEEPHOKM_PORT}"
