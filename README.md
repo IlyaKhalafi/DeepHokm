@@ -215,21 +215,52 @@ accuracy vs. a 0.46 random-legal baseline) confirmed the network can
 represent good play, isolating the original failure to training, not
 architecture.
 
-Current run: 8M steps, seed 0, 32 parallel environments with seat rotation,
-`trick_reward=0.05`, `gamma=0.95`, gauntlet every 250k steps against random
-play, the scripted greedy baseline, the earliest snapshot, and the latest
-snapshot (100 games each). Final numbers and the win-rate curves are in
-`figures/gauntlet_win_rates.png` (regenerate with `make plot`); the table
+Completed run: 8M steps (~3.4 hours on GPU 6), seed 0, 32 parallel
+environments with seat rotation, `trick_reward=0.05`, `gamma=0.95`, gauntlet
+every 250k steps against random play, the scripted greedy baseline, the
+earliest snapshot, and the latest snapshot (100 games each). Win-rate curves
+are in `figures/gauntlet_win_rates.png` and the core PPO scalars in
+`figures/training_scalars.png` (regenerate both with `make plot`); the table
 below is the final gauntlet round of the run.
 
 | Opponent        | Win rate (100 games) |
-| --------------- | -------------------- |
-| Random policy   | see figures          |
-| Greedy baseline | see figures          |
-| First snapshot  | see figures          |
-| Latest snapshot | see figures          |
+| --------------- | --------------------- |
+| Random policy   | 0.70                  |
+| Greedy baseline | 0.15                  |
+| First snapshot  | 0.58                  |
+| Latest snapshot | 0.50                  |
 
-See *Known limitations* for the honest read on where this run landed.
+Against the >= 80% (random) / >= 55% (first snapshot) targets: the first
+snapshot target is met; the random-policy target is not.
+`figures/gauntlet_win_rates.png` shows the full picture: win rate vs. random
+climbs from ~0.58 to a ~0.65-0.81 band by 2M steps and stays there for the
+rest of the run — real early improvement, then noisy fluctuation around a
+plateau that sits mostly below 0.80 rather than a further climb past it. The
+0.70 in the table is the literal final round; two nearby rounds against the
+same fully-trained 8M-step policy read 0.78 and 0.81 (`GauntletCallback`
+runs one round on its normal 250k-step cadence and then one more,
+unconditionally, when training ends, so the last two rounds in the log
+evaluate the identical policy on two different 100-game samples) — noise
+around the same plateau, not evidence the target was actually met. Win rate
+vs. the latest snapshot hovering near 0.50 throughout is expected for
+self-play: the learner and its most recent past self are closely matched by
+construction.
+
+Win rate vs. the scripted greedy baseline never climbed out of a 0.09-0.23
+band across the entire run (see the figure), despite random and snapshot
+performance clearly improving over the same period. A follow-up experiment
+during training narrows down why: loading a 4.5M-step checkpoint and
+fine-tuning it for 150k further steps against an opponent mix that always
+included `GreedyPolicy` (rather than the main run's random/self-play mix,
+which never includes it) moved the win rate against greedy by less than one
+percentage point (0.180 -> 0.187, a shift a 150-game sample can't
+distinguish from noise) at a properly pinned, non-decaying learning rate.
+That rules out the cheapest explanation (the policy has simply never seen
+this opponent style) and points at something that needs either much longer
+exposure or a redesigned self-play mix from the start of a run, not a late
+graft onto an already-converged policy — the next experiment worth running
+is a fresh run with `GreedyPolicy` folded into the primary self-play
+opponent pool from step zero.
 
 ## Configuration
 
@@ -240,6 +271,15 @@ per-machine values live in a gitignored `.env`.
 
 ## Known limitations
 
+- The trained model does not reliably beat a disciplined, non-learning
+  opponent: win rate against the scripted greedy baseline stayed in a
+  0.09-0.23 band for the entire 8M-step run (see *Results*). It plays a
+  clearly-better-than-random game (0.70 vs. random, up from ~0.58 early in
+  training) but has not learned the deeper tactical play that separates it
+  from a simple heuristic. The self-play population's opponent mix (60%
+  latest snapshot, 30% pool, 10% random) never includes a disciplined,
+  non-self-play style during training, only at evaluation time; a targeted
+  fine-tune experiment (see *Results*) suggests this is not a quick fix.
 - Trick-reward shaping trades off long-horizon match strategy for
   learnability: `gamma=0.95` discounts the sparse +/-1 match outcome almost
   to nothing by the time a hand is decided, so the policy optimizes hand-level
