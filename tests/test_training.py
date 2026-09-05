@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import random
 import tempfile
 from collections import Counter
@@ -16,11 +17,46 @@ from deephokm.env import HokmEnv
 from deephokm.nn.policy import HokmMaskablePolicy
 from deephokm.policies.random_policy import RandomPolicy
 from deephokm.rules.state import NUM_SEATS
-from deephokm.training.callbacks import GauntletCallback, SelfPlayCallback
+from deephokm.training.callbacks import (
+    GauntletCallback,
+    RollingCheckpointCallback,
+    SelfPlayCallback,
+)
 from deephokm.training.env_factory import make_env, make_vec_env
-from deephokm.training.gauntlet_workers import run_gauntlet_shards
-from deephokm.training.selfplay import SelfPlayPool
-from deephokm.training.train import build_config, hyperparameters, parse_args
+from deephokm.training.gauntlet_workers import (
+    OpponentSpec,
+    match_seed,
+    run_gauntlet_shards,
+)
+from deephokm.training.selfplay import (
+    PoolOpponentProvider,
+    SelfPlayPool,
+    SnapshotPolicy,
+    snapshot_step,
+)
+from deephokm.training.train import (
+    DEFAULT_GAMMA,
+    DEFAULT_N_STEPS,
+    DEFAULT_TRICK_REWARD,
+    build_config,
+    gauntlet_opponents,
+    hyperparameters,
+    hyperparameters_for_config,
+    parse_args,
+)
+from deephokm.training.train import main as train_main
+
+
+def tiny_model(env: HokmEnv) -> MaskablePPO:
+    """Return a minimal CPU MaskablePPO over the Hokm policy."""
+    return MaskablePPO(
+        HokmMaskablePolicy,
+        env,
+        n_steps=64,
+        batch_size=32,
+        n_epochs=1,
+        device="cpu",
+    )
 
 
 def test_selfplay_pool_add_and_eviction(tmp_path: Path) -> None:
@@ -39,61 +75,146 @@ def test_selfplay_pool_latest_and_empty() -> None:
     assert len(pool) == 0
 
 
-def test_selfplay_pool_sampling_probabilities() -> None:
-    """With snapshots present, the mix must be ~60/30/10."""
-    pool = SelfPlayPool(capacity=10, seed=42)
-    # Paths need not exist for sampling of *which* opponent; but load() would
-    # read them. Instead, patch load to return a sentinel per snapshot.
-    sentinels: dict[str, object] = {}
-    for i in range(4):
-        path = Path(f"/virtual/snap_{i}.zip")
-        pool.add(path, global_step=i)
-        sentinels[str(path)] = f"snap{i}"
+def test_snapshot_step_parses_filename() -> None:
+    assert snapshot_step(Path("/x/snapshot_000000123456.zip")) == 123456
 
-    def fake_load(path: Path) -> object:
-        return sentinels[str(path)]
 
-    pool.load = fake_load  # type: ignore[method-assign]
+def _write_fake_snapshots(directory: Path, steps: list[int]) -> list[Path]:
+    """Create placeholder snapshot files; only their names are read."""
+    directory.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for step in steps:
+        path = directory / f"snapshot_{step:012d}.zip"
+        path.write_bytes(b"not-a-real-zip")
+        paths.append(path)
+    return paths
+
+
+def test_provider_falls_back_to_random_on_unreadable_snapshot(tmp_path: Path) -> None:
+    """A half-written snapshot must not crash a worker."""
+    _write_fake_snapshots(tmp_path, [1000])
+    provider = PoolOpponentProvider(tmp_path, capacity=10, seed=0)
+    drawn = provider()
+    assert len(drawn) == NUM_SEATS
+    assert all(isinstance(p, RandomPolicy) for p in drawn)
+
+
+def test_provider_returns_random_when_directory_is_empty(tmp_path: Path) -> None:
+    provider = PoolOpponentProvider(tmp_path / "missing", capacity=10, seed=0)
+    drawn = provider()
+    assert len(drawn) == NUM_SEATS
+    assert all(isinstance(p, RandomPolicy) for p in drawn)
+
+
+def test_provider_keeps_only_the_newest_capacity_snapshots(tmp_path: Path) -> None:
+    _write_fake_snapshots(tmp_path, [100, 200, 300, 400, 500])
+    provider = PoolOpponentProvider(tmp_path, capacity=2, seed=0)
+    paths = provider.refresh()
+    assert [snapshot_step(p) for p in paths] == [400, 500]
+
+
+def test_provider_picks_up_snapshots_written_after_construction(tmp_path: Path) -> None:
+    """Regression: the pool must reach workers created before it filled.
+
+    Training forks its environment workers up front and only starts writing
+    snapshots later. When the pool was an in-process object the workers kept
+    the (empty) pool they were forked with, so self-play silently degenerated
+    into permanent play against random opponents.
+    """
+    snapshot_dir = tmp_path / "opponents"
+    snapshot_dir.mkdir()
+    provider = PoolOpponentProvider(snapshot_dir, capacity=10, seed=0)
+    assert provider.refresh() == []
+
+    env = make_env(rank=0, seed=0)
+    model = tiny_model(env)
+    callback = SelfPlayCallback(save_freq=64, save_path=snapshot_dir, verbose=0)
+    model.learn(total_timesteps=192, callback=CallbackList([callback]))
+    env.close()
+
+    assert provider.refresh(), "snapshots written after construction must be visible"
+    drawn = provider()
+    assert any(isinstance(policy, SnapshotPolicy) for policy in drawn)
+
+
+def test_provider_draw_mix_is_about_sixty_thirty_ten(tmp_path: Path) -> None:
+    """With snapshots present, the per-seat mix must be ~60/30/10."""
+    _write_fake_snapshots(tmp_path, [100, 200, 300, 400])
+    provider = PoolOpponentProvider(tmp_path, capacity=10, seed=42)
+    provider.refresh()
+    # Load is exercised elsewhere; here only the draw arm matters, so map
+    # every path to a distinguishable sentinel.
+    loaded: dict[Path, str] = {p: p.name for p in provider.refresh()}
+    provider._load = loaded.get  # type: ignore[assignment]
 
     counts: Counter[str] = Counter()
+    latest = provider.refresh()[-1].name
     n = 4000
     for _ in range(n):
-        opponents = pool.sample_opponents(None, None)
-        assert len(opponents) == NUM_SEATS
-        for opp in opponents:
-            if isinstance(opp, RandomPolicy):
+        for policy in provider():
+            if isinstance(policy, RandomPolicy):
                 counts["random"] += 1
             else:
                 counts["snapshot"] += 1
+                if policy == latest:
+                    counts["latest"] += 1
     total = n * NUM_SEATS
-    snapshot_share = counts["snapshot"] / total
-    # 90% of draws should be snapshots (60 latest + 30 pool); allow slack.
-    assert 0.85 < snapshot_share < 0.95, f"snapshot share {snapshot_share}"
+    assert 0.85 < counts["snapshot"] / total < 0.95, dict(counts)
+    # Roughly 60 of the 90 snapshot draws are the newest snapshot.
+    assert counts["latest"] / counts["snapshot"] > 0.5, dict(counts)
 
 
-def test_selfplay_pool_prefers_latest() -> None:
-    """The latest snapshot should be drawn about twice as often as the pool."""
-    pool = SelfPlayPool(capacity=10, seed=7)
-    for i in range(4):
-        pool.add(Path(f"/virtual/snap_{i}.zip"), global_step=i)
-    which: Counter[str] = Counter()
-    original_load = pool.load
+def test_env_redraws_opponents_every_reset() -> None:
+    """The provider is consulted per episode, not once per worker."""
+    drawn: list[int] = []
 
-    def tracked_load(path: Path) -> object:
-        which[path.name] += 1
-        return original_load(path)
+    def provider() -> list[RandomPolicy]:
+        drawn.append(len(drawn))
+        return [RandomPolicy(len(drawn) * 10 + i) for i in range(NUM_SEATS)]
 
-    pool.load = tracked_load  # type: ignore[method-assign]
-    # Sampling calls load(); to avoid file reads, redirect to a fake.
-    pool.load = lambda path: which.update([path.name]) or None  # type: ignore[method-assign]
-    for _ in range(2000):
-        pool.sample_opponents(None, None)
-    latest_name = "snap_3.zip"
-    latest_count = which[latest_name]
-    total_snapshot = sum(which.values())
-    assert total_snapshot > 0
-    # Roughly 60% of snapshot draws are the latest (vs 30% spread over 4).
-    assert latest_count / total_snapshot > 0.5, dict(which)
+    env = HokmEnv(seat=0, opponent_provider=provider)
+    first = env.reset(seed=1)[0]
+    before = list(env.opponents)
+    env.reset(seed=2)
+    assert len(drawn) == 2
+    assert env.opponents != before
+    assert first is not None
+    env.close()
+
+
+def test_env_rejects_provider_with_wrong_length() -> None:
+    env = HokmEnv(seat=0, opponent_provider=lambda: [RandomPolicy(0)])
+    try:
+        env.reset(seed=0)
+    except ValueError as exc:
+        assert "4 policies" in str(exc)
+    else:  # pragma: no cover - the reset must raise
+        raise AssertionError("a short opponent list must be rejected")
+    env.close()
+
+
+def test_vec_env_workers_see_snapshots_written_after_fork(tmp_path: Path) -> None:
+    """End-to-end: subprocess workers must pick up new pool snapshots."""
+    snapshot_dir = tmp_path / "opponents"
+    snapshot_dir.mkdir()
+    provider = PoolOpponentProvider(snapshot_dir, capacity=10, seed=0)
+    venv = make_vec_env(n_envs=2, seed=0, opponent_provider=provider, start_method="fork")
+    try:
+        env = make_env(rank=0, seed=0)
+        model = tiny_model(env)
+        callback = SelfPlayCallback(save_freq=64, save_path=snapshot_dir, verbose=0)
+        model.learn(total_timesteps=192, callback=CallbackList([callback]))
+        env.close()
+
+        venv.reset()
+        kinds = venv.env_method("_draw_opponents")
+        assert len(kinds) == 2
+        names = venv.get_attr("opponents")
+        assert any(
+            type(policy).__name__ == "SnapshotPolicy" for seats in names for policy in seats
+        ), "workers must load snapshots written after the fork"
+    finally:
+        venv.close()
 
 
 def test_make_env_seat_rotation() -> None:
@@ -119,6 +240,7 @@ def test_make_vec_env_shapes_and_masks() -> None:
     venv = make_vec_env(n_envs=2, seed=5, start_method="fork")
     obs = venv.reset()
     assert obs["hand"].shape == (2, 52)
+    assert obs["history"].shape == (2, 48)
     masks = np.stack(venv.env_method("action_masks"))
     assert masks.shape == (2, 56)
     assert (masks.sum(axis=1) > 0).all()
@@ -126,44 +248,52 @@ def test_make_vec_env_shapes_and_masks() -> None:
 
 
 def test_selfplay_callback_cadence(tmp_path: Path) -> None:
-    pool = SelfPlayPool(capacity=10, seed=0)
     env = make_env(rank=0, seed=0)
-    model = MaskablePPO(
-        HokmMaskablePolicy,
-        env,
-        n_steps=64,
-        batch_size=32,
-        n_epochs=1,
-        device="cpu",
-    )
-    callback = SelfPlayCallback(pool=pool, save_freq=64, save_path=tmp_path / "opp", verbose=0)
+    model = tiny_model(env)
+    callback = SelfPlayCallback(save_freq=64, save_path=tmp_path / "opp", verbose=0)
     model.learn(total_timesteps=256, callback=CallbackList([callback]))
-    assert len(pool) >= 2
-    assert all((tmp_path / "opp").joinpath(s.path.name).exists() for s in pool.snapshots)
+    snapshots = sorted((tmp_path / "opp").glob("snapshot_*.zip"))
+    assert len(snapshots) >= 2
+    # Every file the workers can see is a complete zip: nothing partial is
+    # left behind by the staged write.
+    assert not list((tmp_path / "opp").glob("*.partial"))
     env.close()
 
 
-def test_gauntlet_batched_matches_expected_range(tmp_path: Path) -> None:
-    """The batched gauntlet runs games and produces a win rate in [0, 1]."""
+def test_selfplay_callback_prunes_but_keeps_the_first(tmp_path: Path) -> None:
     env = make_env(rank=0, seed=0)
-    model = MaskablePPO(
-        HokmMaskablePolicy,
-        env,
-        n_steps=64,
-        batch_size=32,
-        n_epochs=1,
-        device="cpu",
-    )
+    model = tiny_model(env)
+    callback = SelfPlayCallback(save_freq=64, save_path=tmp_path / "opp", capacity=2, verbose=0)
+    model.learn(total_timesteps=512, callback=CallbackList([callback]))
+    steps = sorted(snapshot_step(p) for p in (tmp_path / "opp").glob("snapshot_*.zip"))
+    # The oldest snapshot survives as the gauntlet's fixed reference; the rest
+    # is the capacity-bounded live pool.
+    assert len(steps) == 3, steps
+    env.close()
+
+
+def test_gauntlet_cadence_is_measured_in_environment_steps(tmp_path: Path) -> None:
+    """Regression: the eval cadence must not be scaled by the worker count."""
+    env = make_env(rank=0, seed=0)
+    model = tiny_model(env)
     callback = GauntletCallback(
-        eval_env_factory=lambda: make_env(rank=0, seed=10_000),
-        opponents={"random": lambda: [RandomPolicy(3 + i) for i in range(NUM_SEATS)]},
-        n_games=8,
-        eval_freq=10**9,
-        batch_size=4,
+        opponents={"random": OpponentSpec(kind="random")},
+        n_games=2,
+        eval_freq=128,
+        n_workers=1,
         verbose=0,
     )
-    model.learn(total_timesteps=64, callback=CallbackList([callback]))
-    # The final-round evaluation ran during _on_training_end.
+    rounds: list[int] = []
+    original = callback.run_gauntlet
+
+    def counted() -> dict[str, float]:
+        rounds.append(callback.num_timesteps)
+        return original()
+
+    callback.run_gauntlet = counted  # type: ignore[method-assign]
+    model.learn(total_timesteps=256, callback=CallbackList([callback]))
+    # 256 steps at one env, a round every 128 steps, plus the final round.
+    assert len(rounds) == 3, rounds
     env.close()
 
 
@@ -175,53 +305,63 @@ class NullWriter(KVWriter):
         pass
 
 
-def test_gauntlet_results_are_deterministic(tmp_path: Path) -> None:
-    """Same seeds + same model => same gauntlet outcome."""
+def test_gauntlet_reports_every_configured_rung(tmp_path: Path) -> None:
     env = make_env(rank=0, seed=0)
-    model = MaskablePPO(
-        HokmMaskablePolicy,
-        env,
-        n_steps=64,
-        batch_size=32,
-        n_epochs=1,
-        device="cpu",
-    )
-
+    model = tiny_model(env)
     model._logger = Logger(None, [NullWriter()])  # type: ignore[assignment]
-
-    def run_gauntlet() -> int:
-        cb = GauntletCallback(
-            eval_env_factory=lambda: make_env(rank=0, seed=10_000),
-            opponents={"random": lambda: [RandomPolicy(3 + i) for i in range(NUM_SEATS)]},
-            n_games=6,
-            eval_freq=10**9,
-            batch_size=3,
-            verbose=0,
-        )
-        cb.model = model
-        cb.num_timesteps = 0
-        cb._logger = model._logger
-        return cb._play_batch("random", lambda: [RandomPolicy(3 + i) for i in range(NUM_SEATS)])
-
-    wins_a = run_gauntlet()
-    wins_b = run_gauntlet()
-    assert wins_a == wins_b
-    assert 0 <= wins_a <= 6
+    callback = GauntletCallback(
+        opponents={
+            "random": OpponentSpec(kind="random"),
+            "greedy": OpponentSpec(kind="greedy"),
+            "first_snapshot": OpponentSpec(kind="snapshot"),
+        },
+        n_games=4,
+        eval_freq=10**9,
+        n_workers=2,
+        verbose=0,
+    )
+    callback.model = model
+    callback.num_timesteps = 0
+    callback._logger = model._logger
+    rates = callback.run_gauntlet()
+    # The snapshot rung is skipped while no snapshot directory is bound.
+    assert set(rates) == {"random", "greedy"}
+    assert all(0.0 <= value <= 1.0 for value in rates.values())
     env.close()
 
 
 def test_hyperparameters_match_spec() -> None:
     hp = hyperparameters()
-    assert hp["learning_rate"] == 3e-4
-    assert hp["n_steps"] == 1024
+    assert hp["n_steps"] == DEFAULT_N_STEPS
+    assert hyperparameters(1024)["n_steps"] == 1024
     assert hp["batch_size"] == 512
     assert hp["n_epochs"] == 10
-    assert hp["gamma"] == 0.997
+    assert hp["gamma"] == DEFAULT_GAMMA
+    assert hyperparameters(gamma=0.997)["gamma"] == 0.997
     assert hp["gae_lambda"] == 0.95
     assert hp["clip_range"] == 0.2
     assert hp["ent_coef"] == 0.01
     assert hp["vf_coef"] == 0.5
     assert hp["max_grad_norm"] == 0.5
+    # Deviations from the reference set, each forced by evidence recorded in
+    # REVIEW_LOG.local.md.
+    assert hp["target_kl"] == 0.03
+    schedule = hp["learning_rate"]
+    assert callable(schedule)
+    # progress_remaining runs 1 -> 0 across training.
+    assert schedule(1.0) == 3e-4
+    assert schedule(0.0) == 0.0
+
+
+def test_hyperparameters_for_config_is_json_safe() -> None:
+    dumped = json.dumps(hyperparameters_for_config())
+    assert "linear" in dumped
+
+
+def test_gauntlet_opponents_cover_the_specified_rungs() -> None:
+    rungs = gauntlet_opponents()
+    assert set(rungs) == {"random", "greedy", "first_snapshot", "latest_snapshot"}
+    assert rungs["first_snapshot"].kind == "snapshot"
 
 
 def test_parse_args_defaults() -> None:
@@ -229,7 +369,8 @@ def test_parse_args_defaults() -> None:
     assert args.total_timesteps == 1_000_000
     assert args.n_envs == 8
     assert args.seed == 0
-    assert args.trick_reward == 0.0
+    assert args.trick_reward == DEFAULT_TRICK_REWARD
+    assert args.gamma == DEFAULT_GAMMA
     assert args.device == "cuda"
 
 
@@ -238,8 +379,9 @@ def test_build_config_covers_reproducibility() -> None:
     config = build_config(args)
     assert config["total_timesteps"] == 100
     assert config["seed"] == 3
-    assert config["hyperparameters"] == hyperparameters()
+    assert config["hyperparameters"] == hyperparameters_for_config()
     assert "network" in config and "observation_layout" in config
+    assert config["opponent_mix"]["latest"] == 0.6
 
 
 def test_random_policy_reset_after_pool_use() -> None:
@@ -269,29 +411,18 @@ def test_random_policy_reset_after_pool_use() -> None:
     env.close()
 
 
-def test_gauntlet_multiprocess_matches_serial(tmp_path: Path) -> None:
+def test_gauntlet_multiprocess_matches_serial() -> None:
     """The sharded gauntlet must equal the serial one and be worker-invariant."""
-
-    # Train a tiny model and save it.
     env = make_env(rank=0, seed=0)
-    model = MaskablePPO(
-        HokmMaskablePolicy,
-        env,
-        n_steps=64,
-        batch_size=32,
-        n_epochs=1,
-        device="cpu",
-    )
+    model = tiny_model(env)
     model.learn(total_timesteps=128)
+    spec = OpponentSpec(kind="random")
     with tempfile.TemporaryDirectory() as tmp:
         model_path = f"{tmp}/m.zip"
         model.save(model_path)
-
-        w1 = run_gauntlet_shards(model_path, None, n_games=12, batch_size=4, n_workers=3, seed=1)
-        w2 = run_gauntlet_shards(model_path, None, n_games=12, batch_size=4, n_workers=3, seed=1)
-        w_serial = run_gauntlet_shards(
-            model_path, None, n_games=12, batch_size=4, n_workers=1, seed=1
-        )
+        w1 = run_gauntlet_shards(model_path, spec, n_games=12, n_workers=3, seed=1)
+        w2 = run_gauntlet_shards(model_path, spec, n_games=12, n_workers=3, seed=1)
+        w_serial = run_gauntlet_shards(model_path, spec, n_games=12, n_workers=1, seed=1)
     assert w1 == w2, "same-seed gauntlet rounds must match"
     assert w1 == w_serial, "worker count must not change results"
     assert 0 <= w1 <= 12
@@ -300,27 +431,103 @@ def test_gauntlet_multiprocess_matches_serial(tmp_path: Path) -> None:
 
 def test_gauntlet_snapshot_round_runs(tmp_path: Path) -> None:
     """A gauntlet round against a real snapshot file completes and reports."""
-
-    pool = SelfPlayPool(capacity=2, seed=0)
     env = make_env(rank=0, seed=0)
-    model = MaskablePPO(
-        HokmMaskablePolicy,
-        env,
-        n_steps=64,
-        batch_size=32,
-        n_epochs=1,
-        device="cpu",
-    )
-    cb = SelfPlayCallback(pool=pool, save_freq=64, save_path=tmp_path / "opp")
-    model.learn(total_timesteps=128, callback=CallbackList([cb]))
-    snapshot = pool.latest()
-    assert snapshot is not None
+    model = tiny_model(env)
+    callback = SelfPlayCallback(save_freq=64, save_path=tmp_path / "opp")
+    model.learn(total_timesteps=128, callback=CallbackList([callback]))
+    snapshots = sorted((tmp_path / "opp").glob("snapshot_*.zip"))
+    assert snapshots
 
     with tempfile.TemporaryDirectory() as tmp:
         model_path = f"{tmp}/m.zip"
         model.save(model_path)
         wins = run_gauntlet_shards(
-            model_path, str(snapshot.path), n_games=8, batch_size=4, n_workers=2, seed=0
+            model_path,
+            OpponentSpec(kind="snapshot", path=str(snapshots[-1])),
+            n_games=8,
+            n_workers=2,
+            seed=0,
         )
     assert 0 <= wins <= 8
     env.close()
+
+
+def test_match_seeds_are_disjoint_between_rounds() -> None:
+    """Regression: every gauntlet round replayed the same 100 deals.
+
+    ``run_gauntlet_shards`` takes a round seed, but it only ever reached the
+    evaluation env's construction — each game was reset with its bare index,
+    so round 0 and round 40 scored the identical deals and the win-rate curve
+    carried no fresh sample at all.
+    """
+    round_a = {match_seed(0, i) for i in range(100)}
+    round_b = {match_seed(1, i) for i in range(100)}
+    assert not round_a & round_b
+    # The seed depends on the game index, not on the shard that drew it.
+    assert match_seed(3, 7) == match_seed(3, 7)
+
+
+def test_rolling_checkpoint_keeps_only_the_newest(tmp_path: Path) -> None:
+    """Checkpoint retention must be bounded; archives carry optimizer state."""
+    env = make_env(rank=0, seed=0)
+    model = tiny_model(env)
+    callback = RollingCheckpointCallback(
+        save_freq=64,
+        save_path=str(tmp_path / "ckpt"),
+        name_prefix="ppo",
+        keep=2,
+        verbose=0,
+    )
+    model.learn(total_timesteps=512, callback=CallbackList([callback]))
+    saved = sorted((tmp_path / "ckpt").glob("ppo_*_steps.zip"))
+    assert len(saved) == 2, [p.name for p in saved]
+    steps = sorted(int(p.stem.rsplit("_", 2)[-2]) for p in saved)
+    assert steps == steps[-2:], steps
+    env.close()
+
+
+def test_resume_continues_from_a_saved_run(tmp_path: Path) -> None:
+    """Regression: ``--resume`` raised TypeError before doing any work.
+
+    ``env`` was both a named argument of ``MaskablePPO.load`` and a member of
+    the forwarded keyword overrides, so every resume attempt died immediately
+    after forking the workers.
+    """
+    out = tmp_path / "run"
+    common = [
+        "--n-envs",
+        "1",
+        "--n-steps",
+        "64",
+        "--eval-every",
+        "10000000",
+        "--snapshot-every",
+        "10000000",
+        "--checkpoint-every",
+        "10000000",
+        "--eval-games",
+        "2",
+        "--eval-workers",
+        "1",
+        "--device",
+        "cpu",
+        "--tensorboard-log",
+        str(tmp_path / "tb"),
+        "--out-dir",
+        str(out),
+    ]
+    train_main(["--total-timesteps", "64", *common])
+    first = out / "final.zip"
+    assert first.is_file()
+
+    resumed_dir = tmp_path / "resumed"
+    train_main(
+        [
+            "--total-timesteps",
+            "64",
+            "--resume",
+            str(first),
+            *[a if a != str(out) else str(resumed_dir) for a in common],
+        ]
+    )
+    assert (resumed_dir / "final.zip").is_file()

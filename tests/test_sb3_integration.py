@@ -17,8 +17,9 @@ from deephokm.policies.random_policy import RandomPolicy
 from deephokm.rules.legality import NUM_ACTIONS
 from deephokm.rules.state import NUM_SEATS
 from deephokm.training.callbacks import GauntletCallback, SelfPlayCallback
-from deephokm.training.env_factory import make_env, make_vec_env
-from deephokm.training.selfplay import SelfPlayPool
+from deephokm.training.env_factory import make_vec_env
+from deephokm.training.gauntlet_workers import OpponentSpec
+from deephokm.training.selfplay import PoolOpponentProvider, SnapshotPolicy
 
 
 def tiny_model(env: VecEnv | HokmEnv, **kwargs: object) -> MaskablePPO:
@@ -144,51 +145,37 @@ def test_vec_env_reset_is_seeded() -> None:
 
 
 def test_selfplay_callback_snapshots(tmp_path: pathlib.Path) -> None:
-
-    pool = SelfPlayPool(capacity=10, seed=0)
+    snapshot_dir = pathlib.Path(str(tmp_path)) / "opponents"
     env = make_single_env()
     model = tiny_model(env)
-    callback = SelfPlayCallback(
-        pool=pool,
-        save_freq=64,
-        save_path=pathlib.Path(str(tmp_path)) / "opponents",
-        verbose=0,
-    )
+    callback = SelfPlayCallback(save_freq=64, save_path=snapshot_dir, verbose=0)
     model.learn(total_timesteps=256, callback=CallbackList([callback]))
-    assert len(pool) >= 1
-    snapshots = pool.snapshots
-    assert all(s.global_step >= 0 for s in snapshots)
+    snapshots = sorted(snapshot_dir.glob("snapshot_*.zip"))
+    assert snapshots
+    assert all(path.stat().st_size > 0 for path in snapshots)
     env.close()
 
 
 def test_selfplay_pool_bounded_eviction(tmp_path: pathlib.Path) -> None:
-
+    """The directory the workers scan stays bounded by the pool capacity."""
     base = pathlib.Path(str(tmp_path))
-    pool = SelfPlayPool(capacity=3, seed=0)
     env = make_single_env()
     model = tiny_model(env)
-    callback = SelfPlayCallback(pool=pool, save_freq=32, save_path=base / "opp", verbose=0)
+    callback = SelfPlayCallback(save_freq=32, save_path=base / "opp", capacity=3, verbose=0)
     model.learn(total_timesteps=256, callback=CallbackList([callback]))
-    assert len(pool) <= 3
+    provider = PoolOpponentProvider(base / "opp", capacity=3, seed=0)
+    assert len(provider.refresh()) <= 3
     env.close()
 
 
 def test_gauntlet_callback_runs(tmp_path: pathlib.Path) -> None:
-
-    def factory() -> HokmEnv:
-        return make_env(rank=0, seed=10_000)
-
-    def random_opponents() -> list:
-        return [RandomPolicy(5 + i) for i in range(4)]
-
     env = make_single_env()
     model = tiny_model(env)
     callback = GauntletCallback(
-        eval_env_factory=factory,
-        opponents={"random": random_opponents},
+        opponents={"random": OpponentSpec(kind="random")},
         n_games=4,
         eval_freq=64,
-        batch_size=4,
+        n_workers=2,
         verbose=1,
     )
     model.learn(total_timesteps=128, callback=CallbackList([callback]))
@@ -213,17 +200,16 @@ def test_eval_callback_runs() -> None:
 
 
 def test_snapshot_policy_acts_legally(tmp_path: pathlib.Path) -> None:
-    """A snapshot loaded through the pool returns only legal actions."""
-
-    pool = SelfPlayPool(capacity=2, seed=0)
+    """A snapshot loaded from the pool directory returns only legal actions."""
     env = make_single_env()
     model = tiny_model(env)
     opponents_dir = pathlib.Path(str(tmp_path)) / "opp"
-    callback = SelfPlayCallback(pool=pool, save_freq=64, save_path=opponents_dir)
+    callback = SelfPlayCallback(save_freq=64, save_path=opponents_dir)
     model.learn(total_timesteps=128, callback=CallbackList([callback]))
-    assert len(pool) >= 1
+    snapshots = sorted(opponents_dir.glob("snapshot_*.zip"))
+    assert snapshots
 
-    snap = pool.load(pool.snapshots[0].path)
+    snap = SnapshotPolicy.from_file(snapshots[0])
     obs, info = env.reset(seed=7)
     legal = np.flatnonzero(info["action_mask"])
     for _ in range(5):
@@ -245,16 +231,20 @@ def test_dummy_vec_env_masking_supported() -> None:
 
 
 def test_policy_load_roundtrip_via_pool(tmp_path: pathlib.Path) -> None:
-    """Snapshots saved by the callback load back through SnapshotPolicy."""
-
-    pool = SelfPlayPool(capacity=2, seed=0)
+    """Snapshots saved by the callback load back and reproduce their actions."""
     env = make_single_env()
     model = tiny_model(env)
     opponents_dir = pathlib.Path(str(tmp_path)) / "opp"
-    callback = SelfPlayCallback(pool=pool, save_freq=64, save_path=opponents_dir)
+    callback = SelfPlayCallback(save_freq=64, save_path=opponents_dir)
     model.learn(total_timesteps=128, callback=CallbackList([callback]))
-    snap = pool.load(pool.latest().path)
-    assert snap is not None
+    latest = sorted(opponents_dir.glob("snapshot_*.zip"))[-1]
+
+    snap = SnapshotPolicy.from_file(latest)
+    obs, info = env.reset(seed=11)
+    mask = np.asarray(info["action_mask"], dtype=bool)
+    first = snap.act(obs, mask)
+    reloaded = SnapshotPolicy.from_file(latest)
+    assert reloaded.act(obs, mask) == first
     env.close()
 
 

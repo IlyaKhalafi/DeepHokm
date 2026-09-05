@@ -1,222 +1,237 @@
 """Training callbacks: self-play snapshots and evaluation gauntlet logging.
 
-The self-play callback periodically saves the current policy into the
-:class:`~deephokm.training.selfplay.SelfPlayPool`. Evaluation against the
-gauntlet (random policy, earliest snapshot, latest snapshot) is handled by
-SB3's ``EvalCallback`` plus :class:`GauntletCallback`, which runs round-robin
-evaluations and writes win rates to the TensorBoard log.
+:class:`SelfPlayCallback` periodically saves the current policy into the
+snapshot directory that the worker environments read (see
+:class:`~deephokm.training.selfplay.PoolOpponentProvider`).
+:class:`GauntletCallback` plays the current policy against a fixed set of
+opponents and writes the win rates to the TensorBoard log.
 """
 
 from __future__ import annotations
 
 import tempfile
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 
-from deephokm.env.hokm_env import HokmEnv
-from deephokm.env.spaces import Observation
-from deephokm.rules.state import team_of
-from deephokm.training.gauntlet_workers import run_gauntlet_shards
-from deephokm.training.selfplay import SelfPlayPool, SnapshotPolicy
+from deephokm.training.gauntlet_workers import OpponentSpec, run_gauntlet_shards
+from deephokm.training.selfplay import SNAPSHOT_GLOB, snapshot_step
 
 
 class SelfPlayCallback(BaseCallback):
     """Snapshot the current policy into the opponent pool on a step cadence.
 
+    Snapshots are written atomically (temporary name, then rename) because
+    the environment worker processes read the same directory concurrently
+    and must never load a half-written zip. Files beyond ``capacity`` are
+    deleted so the directory the workers scan is exactly the live pool.
+
     Attributes:
-        pool: The pool receiving snapshots.
         save_freq: Environment steps between snapshots.
         save_path: Directory the snapshot zips are written to.
+        capacity: Number of snapshots retained on disk.
     """
 
     def __init__(
         self,
-        pool: SelfPlayPool,
         *,
         save_freq: int,
         save_path: Path,
+        capacity: int = 10,
         verbose: int = 0,
     ) -> None:
         """Create the callback.
 
         Args:
-            pool: The self-play pool to feed.
-            save_freq: Steps between snapshots.
+            save_freq: Environment steps between snapshots.
             save_path: Directory for snapshot files.
+            capacity: Snapshots kept on disk (oldest deleted beyond it).
             verbose: SB3 verbosity.
         """
         super().__init__(verbose)
-        self.pool = pool
         self.save_freq = save_freq
         self.save_path = save_path
+        self.capacity = capacity
         self._last_snapshot_step = 0
 
     def _on_step(self) -> bool:
         """Snapshot when the step cadence elapses."""
         if self.num_timesteps - self._last_snapshot_step >= self.save_freq:
-            self._snapshot()
+            self.snapshot()
         return True
 
-    def _snapshot(self) -> None:
-        """Save the current policy into the pool."""
+    def snapshot(self) -> Path:
+        """Save the current policy into the pool directory atomically."""
         self.save_path.mkdir(parents=True, exist_ok=True)
         path = self.save_path / f"snapshot_{self.num_timesteps:012d}.zip"
+        staging = path.with_suffix(".zip.partial")
         # Save the policy only (the full model carries the optimizer state,
         # which opponents never need and which triples the snapshot size).
-        self.model.policy.save(str(path))
-        self.pool.add(path, self.num_timesteps)
+        self.model.policy.save(str(staging))
+        staging.replace(path)
+        self._prune()
         self._last_snapshot_step = self.num_timesteps
-        self.logger.record("selfplay/pool_size", len(self.pool))
+        self.logger.record("selfplay/pool_size", self._pool_size())
         if self.verbose:
             print(f"[selfplay] snapshot at step {self.num_timesteps} -> {path.name}")
+        return path
+
+    def _pool_size(self) -> int:
+        """Return the number of snapshots the workers currently draw from."""
+        return min(len(list(self.save_path.glob(SNAPSHOT_GLOB))), self.capacity)
+
+    def _prune(self) -> None:
+        """Delete all but the newest ``capacity`` snapshots.
+
+        The earliest snapshot is kept regardless: the gauntlet measures
+        progress against it, so it is a fixed reference rather than pool
+        membership.
+        """
+        existing = sorted(self.save_path.glob(SNAPSHOT_GLOB), key=snapshot_step)
+        if len(existing) <= self.capacity:
+            return
+        keep = set(existing[-self.capacity :]) | {existing[0]}
+        for path in existing:
+            if path not in keep:
+                path.unlink(missing_ok=True)
+
+
+class RollingCheckpointCallback(CheckpointCallback):
+    """``CheckpointCallback`` that retains only the newest ``keep`` archives.
+
+    A full model archive carries the optimizer state, so an unbounded series
+    fills the run directory with tens of gigabytes over a long run for no
+    benefit — only the newest few are ever resumed from.
+
+    Attributes:
+        keep: Number of checkpoint archives retained.
+    """
+
+    def __init__(self, *args: Any, keep: int = 5, **kwargs: Any) -> None:
+        """Create the callback.
+
+        Args:
+            *args: Forwarded to ``CheckpointCallback``.
+            keep: Number of newest checkpoints to retain.
+            **kwargs: Forwarded to ``CheckpointCallback``.
+        """
+        super().__init__(*args, **kwargs)
+        self.keep = keep
+
+    def _on_step(self) -> bool:
+        """Save on cadence, then drop everything but the newest ``keep``."""
+        result = super()._on_step()
+        if self.n_calls % self.save_freq == 0:
+            self._prune()
+        return result
+
+    def _prune(self) -> None:
+        """Delete all but the newest ``keep`` checkpoint archives."""
+        directory = Path(self.save_path)
+        existing = sorted(
+            directory.glob(f"{self.name_prefix}_*_steps.zip"),
+            key=lambda path: int(path.stem.rsplit("_", 2)[-2]),
+        )
+        for path in existing[: -self.keep] if self.keep > 0 else existing:
+            path.unlink(missing_ok=True)
 
 
 class GauntletCallback(BaseCallback):
     """Evaluate the policy against fixed opponents and log win rates.
 
-    Games run in parallel batches: ``batch_size`` environments advance
-    together and their observations are stacked into a single policy forward
-    pass per decision round, which is an order of magnitude faster than
-    one-game-at-a-time inference on this network.
+    Each round saves the live model once, then plays every gauntlet opponent
+    across worker processes, which cuts the wall time of a round to a
+    fraction of what it costs inside the training loop. Training does block
+    for the round: the point is that the round is short, not that it is
+    asynchronous.
+
+    Attributes:
+        opponents: Gauntlet name -> opponent specification.
+        n_games: Games per opponent per round.
+        eval_freq: Environment steps between rounds.
     """
 
     def __init__(
         self,
-        eval_env_factory: Callable[[], HokmEnv],
         *,
-        opponents: dict[str, Callable[[], list[Any]]],
+        opponents: dict[str, OpponentSpec],
         n_games: int,
         eval_freq: int,
-        batch_size: int = 32,
         n_workers: int = 8,
         verbose: int = 0,
     ) -> None:
         """Create the callback.
 
         Args:
-            eval_env_factory: Zero-arg callable producing a fresh eval env.
-            opponents: Gauntlet name -> factory producing the opponent list.
+            opponents: Gauntlet name -> opponent specification. Entries whose
+                spec resolves to ``None`` at round time are skipped.
             n_games: Games per gauntlet opponent per round.
-            eval_freq: Steps between evaluation rounds.
-            batch_size: Environments advanced concurrently per worker.
+            eval_freq: Environment steps between evaluation rounds.
             n_workers: Processes sharing a gauntlet round.
             verbose: SB3 verbosity.
         """
         super().__init__(verbose)
-        self.eval_env_factory = eval_env_factory
         self.opponents = opponents
         self.n_games = n_games
         self.eval_freq = eval_freq
-        self.batch_size = batch_size
         self.n_workers = n_workers
         self._last_eval_step = 0
         self._eval_count = 0
+        self._snapshot_dir: Path | None = None
+
+    def bind_snapshot_dir(self, snapshot_dir: Path) -> None:
+        """Point the callback at the live snapshot directory.
+
+        The first and latest snapshot rungs are resolved per round from this
+        directory, so they track the pool the training process is writing.
+        """
+        self._snapshot_dir = snapshot_dir
 
     def _on_step(self) -> bool:
-        """Run a gauntlet round when the cadence elapses."""
+        """Run a gauntlet round when the step cadence elapses."""
         if self.num_timesteps - self._last_eval_step >= self.eval_freq:
-            self._run_gauntlet()
+            self.run_gauntlet()
         return True
 
     def _on_training_end(self) -> None:
         """Run a final round so the log ends on fresh numbers."""
-        self._run_gauntlet()
+        self.run_gauntlet()
 
-    def _run_gauntlet(self) -> None:
-        """Play every gauntlet opponent and log win rates.
+    def _resolve(self, name: str, spec: OpponentSpec) -> OpponentSpec | None:
+        """Resolve a snapshot rung against the live snapshot directory."""
+        if spec.kind != "snapshot":
+            return spec
+        if self._snapshot_dir is None:
+            return None
+        found = sorted(self._snapshot_dir.glob(SNAPSHOT_GLOB), key=snapshot_step)
+        if not found:
+            return None
+        chosen = found[0] if name == "first_snapshot" else found[-1]
+        return OpponentSpec(kind="snapshot", path=str(chosen))
 
-        Rounds run in worker processes (each plays a shard of games with its
-        own batched loop and model copy) so a 100-game gauntlet costs a
-        fraction of the wall time it would take inside the training loop.
-        """
+    def run_gauntlet(self) -> dict[str, float]:
+        """Play every gauntlet opponent and log win rates."""
+        rates: dict[str, float] = {}
         with tempfile.TemporaryDirectory() as tmp:
             model_path = str(Path(tmp) / "eval_model.zip")
             self.model.save(model_path)
-            for name, make_opponents in self.opponents.items():
-                snapshot_path = _snapshot_path_of(make_opponents())
+            for name, spec in self.opponents.items():
+                resolved = self._resolve(name, spec)
+                if resolved is None:
+                    continue
                 wins = run_gauntlet_shards(
                     model_path=model_path,
-                    snapshot_path=snapshot_path,
+                    spec=resolved,
                     n_games=self.n_games,
-                    batch_size=self.batch_size,
                     n_workers=self.n_workers,
                     seed=self._eval_count,
                 )
                 win_rate = wins / self.n_games
+                rates[name] = win_rate
                 self.logger.record(f"gauntlet/{name}", win_rate)
                 if self.verbose:
                     print(f"[gauntlet] {name}: {win_rate:.3f} over {self.n_games} games")
         self._last_eval_step = self.num_timesteps
         self._eval_count += 1
-
-    def _play_batch(self, name: str, make_opponents: Callable[[], list[Any]]) -> int:
-        """Play all games against one opponent, in parallel batches."""
-        del name
-        envs: list[HokmEnv] = []
-        results = [False] * self.n_games
-        active: list[int] = []
-        obs_by_env: dict[HokmEnv, Observation] = {}
-        info_by_env: dict[HokmEnv, dict[str, Any]] = {}
-        next_game = 0
-        try:
-            while next_game < self.n_games or active:
-                while len(active) < self.batch_size and next_game < self.n_games:
-                    env = self.eval_env_factory()
-                    env.opponents = make_opponents()
-                    obs, info = env.reset(seed=next_game)
-                    envs.append(env)
-                    active.append(next_game)
-                    obs_by_env[env] = obs
-                    info_by_env[env] = info
-                    next_game += 1
-                # One stacked forward pass for every live env.
-                first = obs_by_env[envs[0]]
-                stacked = {
-                    "hand": np.stack([obs_by_env[env]["hand"] for env in envs]),
-                    "seen": np.stack([obs_by_env[env]["seen"] for env in envs]),
-                    "trick": np.stack([obs_by_env[env]["trick"] for env in envs]),
-                    "trick_play": np.stack([obs_by_env[env]["trick_play"] for env in envs]),
-                    "trump": np.stack([obs_by_env[env]["trump"] for env in envs]),
-                    "phase": np.stack([obs_by_env[env]["phase"] for env in envs]),
-                    "tricks_won": np.stack([obs_by_env[env]["tricks_won"] for env in envs]),
-                    "game_points": np.stack([obs_by_env[env]["game_points"] for env in envs]),
-                    "seat": np.stack([obs_by_env[env]["seat"] for env in envs]),
-                }
-                del first
-                masks = np.stack(
-                    [np.asarray(info_by_env[env]["action_mask"], dtype=bool) for env in envs]
-                )
-                actions, _ = self.model.predict(stacked, action_masks=masks, deterministic=True)  # type: ignore[call-arg]
-                # Step each env; collect finished games.
-                finished: list[int] = []
-                for i, env in enumerate(envs):
-                    obs, _reward, terminated, truncated, info = env.step(
-                        np.int64(int(np.asarray(actions[i]).reshape(-1)[0]))
-                    )
-                    if terminated or truncated:
-                        winner = env._engine.state.winner
-                        results[active[i]] = winner == team_of(env.seat)
-                        finished.append(i)
-                    else:
-                        obs_by_env[env] = obs
-                        info_by_env[env] = info
-                for i in reversed(finished):
-                    envs[i].close()
-                    envs.pop(i)
-                    active.pop(i)
-        finally:
-            for env in envs:
-                env.close()
-        return sum(results)
-
-
-def _snapshot_path_of(opponents: list[Any]) -> str | None:
-    """Return the snapshot file the opponent list was built from, if any."""
-    for opponent in opponents:
-        if isinstance(opponent, SnapshotPolicy):
-            return opponent.path_str
-    return None
+        return rates
