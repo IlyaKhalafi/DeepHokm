@@ -2,8 +2,11 @@
 
 Snapshot policies are :class:`~deephokm.nn.policy.HokmMaskablePolicy`
 instances saved from an earlier training state. Per episode the environment
-draws which policy plays each opponent seat: 60% the latest snapshot, 30%
-uniform over the pool, 10% the random policy.
+draws one policy per opponent team (see :data:`P_LATEST`, :data:`P_POOL`,
+:data:`P_GREEDY`, :data:`P_RANDOM` for the mix): predominantly the latest
+snapshot or the retained pool, with a small share of the scripted
+:class:`~deephokm.policies.greedy_policy.GreedyPolicy` baseline and a small
+share of fresh random play.
 
 Training runs the environments in forked worker processes, so the pool
 cannot be shared as a Python object: the workers would keep the snapshot
@@ -33,9 +36,9 @@ from deephokm.policies.base import HokmPolicy
 from deephokm.policies.greedy_policy import GreedyPolicy
 from deephokm.policies.random_policy import RandomPolicy
 
-P_LATEST = 0.45
-P_POOL = 0.20
-P_GREEDY = 0.25
+P_LATEST = 0.55
+P_POOL = 0.25
+P_GREEDY = 0.10
 P_RANDOM = 0.10
 
 SNAPSHOT_GLOB = "snapshot_*.zip"

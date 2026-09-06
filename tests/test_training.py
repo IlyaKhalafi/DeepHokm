@@ -184,11 +184,11 @@ def test_provider_draw_mix_matches_the_documented_probabilities(tmp_path: Path) 
     snapshot_share = counts["snapshot"] / total
     greedy_share = counts["greedy"] / total
     random_share = counts["random"] / total
-    assert 0.60 < snapshot_share < 0.70, dict(counts)  # P_LATEST + P_POOL = 0.65
-    assert 0.20 < greedy_share < 0.30, dict(counts)  # P_GREEDY = 0.25
+    assert 0.75 < snapshot_share < 0.85, dict(counts)  # P_LATEST + P_POOL = 0.80
+    assert 0.05 < greedy_share < 0.15, dict(counts)  # P_GREEDY = 0.10
     assert 0.05 < random_share < 0.15, dict(counts)  # P_RANDOM = 0.10
-    # Of the snapshot draws, P_LATEST / (P_LATEST + P_POOL) = 0.45/0.65 are latest.
-    assert counts["latest"] / counts["snapshot"] > 0.55, dict(counts)
+    # Of the snapshot draws, P_LATEST / (P_LATEST + P_POOL) = 0.55/0.80 are latest.
+    assert counts["latest"] / counts["snapshot"] > 0.60, dict(counts)
 
 
 def test_env_redraws_opponents_every_reset() -> None:
@@ -419,8 +419,8 @@ def test_build_config_covers_reproducibility() -> None:
     assert config["hand_reward"] == DEFAULT_HAND_REWARD
     assert config["hyperparameters"] == hyperparameters_for_config()
     assert "network" in config and "observation_layout" in config
-    assert config["opponent_mix"]["latest"] == 0.45
-    assert config["opponent_mix"]["greedy"] == 0.25
+    assert config["opponent_mix"]["latest"] == 0.55
+    assert config["opponent_mix"]["greedy"] == 0.10
 
 
 def test_random_policy_reset_after_pool_use() -> None:

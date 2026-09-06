@@ -123,18 +123,25 @@ The CLI dumps a reproducible `config.json` next to the checkpoints and
 resumes via `--resume <checkpoint.zip>`.
 
 **Self-play.** Every environment re-draws its opponents at each `reset()` as
-one team-coherent pair rather than four independent seats: 45% the latest
-snapshot, 20% uniform over the retained pool, 25% the scripted `GreedyPolicy`,
+one team-coherent pair rather than four independent seats: 55% the latest
+snapshot, 25% uniform over the retained pool, 10% the scripted `GreedyPolicy`,
 10% a fresh random policy — the same draw fills both seats of one team, so a
 table is never a mix of "one partner + two mismatched opponents". Snapshots
 are written atomically into the run's `opponents/` directory and the workers
 rescan that directory, because the environments run in forked subprocesses
 and a pool held as an in-process Python object would never reach them.
 Snapshot opponents sample rather than take their argmax, so the learner meets
-varied lines instead of one frozen script. `GreedyPolicy` was folded into the
+varied lines instead of one frozen script. `GreedyPolicy` is folded into the
 primary mix (rather than only appearing at evaluation time) specifically
 because the first completed run's win rate against it never improved — see
-*Results* for that experiment.
+*Results* for that experiment. Its share started at 25% in an aborted
+follow-up run and was cut to 10%: at 25%, gauntlet win rate against *both*
+random and greedy sat flat (no upward trend across the first 4.75M of 8M
+steps, worse than the original run's early ramp), consistent with a quarter
+of every training table being a disciplined, non-exploitable opponent
+diluting the learning signal before the policy has any competence at all.
+10% keeps some greedy exposure from step zero without dominating the
+curriculum the way 25% did.
 
 **Evaluation.** The gauntlet plays the learner in one seat against a table of
 the named opponent — the scripted `GreedyPolicy` also fills the learner's own
