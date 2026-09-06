@@ -174,7 +174,7 @@ container's environment, not the shell expansions in these flags):
 set -a; . ./.env; set +a
 docker build -t deephokm-web:latest .
 docker run --rm -p "${DEEPHOKM_PORT}:${DEEPHOKM_PORT}" --tmpfs /tmp \
-  --gpus "device=${DEEPHOKM_GPU_DEVICE_ID}" --env-file .env deephokm-web:latest
+  --env-file .env deephokm-web:latest
 ```
 
 The image is a multi-stage uv build. The trained checkpoint is baked in from
@@ -188,11 +188,14 @@ cp checkpoints/<run>/checkpoints/ppo_<step>_steps.zip checkpoints/final.zip
 At run time a read-only bind mount can override the baked checkpoint: set
 `DEEPHOKM_MODEL_PATH` in `.env` (absolute or relative to the compose file;
 it defaults to the repository's own `checkpoints/final.zip`, so the mount is
-a no-op override rather than a requirement). All deployment values (GPU
-device id, port, model path) come from the environment — changing
-`DEEPHOKM_GPU_DEVICE_ID` in `.env` is the only thing needed to re-pin the GPU.
-The container serves on CPU by default (batch-1 inference is faster there,
-see `src/deephokm/webui/serving.py`), so the GPU reservation is optional. It
+a no-op override rather than a requirement). The container never reserves a
+GPU device at all: `ServedPolicy` always runs inference on CPU (batch-1
+calls are faster there than a GPU round-trip; see
+`src/deephokm/webui/serving.py`), so a mandatory device reservation would
+only break `docker compose up` on a machine with no nvidia container
+runtime for no benefit. `DEEPHOKM_GPU_DEVICE_ID` still pins bare-metal
+training and the dev web UI server (`make train`, `make webui`) to GPU 6 via
+`CUDA_VISIBLE_DEVICES`; it plays no role in the container. The container
 runs as an unprivileged user with a RAM-backed `/tmp` and writes nothing
 durable, so the only host state it needs is the mounted checkpoint.
 

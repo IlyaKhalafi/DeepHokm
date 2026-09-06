@@ -27,11 +27,13 @@ services:
       # checkpoint the image was built from, which makes the mount a no-op
       # rather than a requirement; relative paths resolve against this file.
       - ${DEEPHOKM_MODEL_PATH:-./checkpoints/final.zip}:/app/checkpoints/final.zip:ro
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["${DEEPHOKM_GPU_DEVICE_ID}"]
-              capabilities: [gpu]
+    # No GPU device reservation: ServedPolicy always runs inference on CPU
+    # (batch-1 calls are faster there than a GPU round-trip; see
+    # src/deephokm/webui/serving.py). A mandatory `deploy.resources.
+    # reservations.devices` entry here would make `docker compose up` fail
+    # outright on any machine without an nvidia container runtime, which
+    # contradicts the CPU-only reality and breaks portability for no benefit.
+    # DEEPHOKM_GPU_DEVICE_ID still governs bare-metal training and the web UI
+    # dev server via CUDA_VISIBLE_DEVICES (see the Makefile); it is unrelated
+    # to this container, which never touches a GPU.
     restart: unless-stopped
