@@ -21,6 +21,7 @@ def make_env(
     seed: int = 0,
     opponent_provider: OpponentProvider | None = None,
     trick_reward: float = 0.0,
+    hand_reward: float = 0.0,
 ) -> HokmEnv:
     """Build one learning environment for worker ``rank``.
 
@@ -35,15 +36,24 @@ def make_env(
         seed: Base seed; the worker seed is ``seed + rank``.
         opponent_provider: Callable returning the 4 seat policies per episode.
         trick_reward: Optional per-trick shaping magnitude.
+        hand_reward: Optional per-hand shaping magnitude.
 
     Returns:
         The (unwrapped) environment.
     """
     seat = rank % NUM_SEATS
+    reseed = getattr(opponent_provider, "reseed", None)
+    if callable(reseed):
+        # A provider shared across SubprocVecEnv workers is forked into each
+        # subprocess at the same RNG state; without this every worker's
+        # first draw (before any per-episode reset() advances it) would pick
+        # the identical opponent mix.
+        reseed(seed + rank)
     env = _HokmEnv(
         seat=seat,
         opponents=[RandomPolicy(seed + rank + i) for i in range(NUM_SEATS)],
         trick_reward=trick_reward,
+        hand_reward=hand_reward,
         opponent_provider=opponent_provider,
     )
     # Seed the engine now so the very first reset() (which SubprocVecEnv
@@ -55,8 +65,10 @@ def make_env(
 def make_vec_env(
     n_envs: int = 8,
     seed: int = 0,
+    *,
     opponent_provider: OpponentProvider | None = None,
     trick_reward: float = 0.0,
+    hand_reward: float = 0.0,
     start_method: str | None = None,
 ) -> VecMonitor:
     """Build the vectorized training environment.
@@ -66,6 +78,7 @@ def make_vec_env(
         seed: Base seed (worker ``i`` uses ``seed + i``).
         opponent_provider: Per-episode opponent factory, re-drawn on reset.
         trick_reward: Optional per-trick shaping.
+        hand_reward: Optional per-hand shaping.
         start_method: Subprocess start method (default fork).
 
     Returns:
@@ -82,6 +95,7 @@ def make_vec_env(
                 seed=seed,
                 opponent_provider=opponent_provider,
                 trick_reward=trick_reward,
+                hand_reward=hand_reward,
             )
 
         return _thunk

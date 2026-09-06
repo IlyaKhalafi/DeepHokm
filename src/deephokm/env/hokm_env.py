@@ -7,7 +7,8 @@ environment step equals one learner decision.
 
 Rewards are sparse by default: +1 when the learner's team wins the match, -1
 when it loses, 0 otherwise. ``trick_reward`` optionally adds per-trick
-shaping.
+shaping; ``hand_reward`` optionally adds per-hand shaping (the coarser,
+usually preferable alternative -- see the constructor docstring).
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ class HokmEnv(gym.Env[Observation, np.integer]):
             replace ``opponents``; self-play training uses it to pick a fresh
             opponent mix per episode.
         trick_reward: Optional per-trick shaping magnitude (default 0).
+        hand_reward: Optional per-hand shaping magnitude (default 0).
         render_mode: ``"human"`` prints a trick log; ``None`` is silent.
     """
 
@@ -53,9 +55,11 @@ class HokmEnv(gym.Env[Observation, np.integer]):
         self,
         seat: int = 0,
         opponents: list[HokmPolicy] | None = None,
+        *,
         trick_reward: float = 0.0,
         render_mode: str | None = None,
         opponent_provider: Callable[[], list[HokmPolicy]] | None = None,
+        hand_reward: float = 0.0,
     ) -> None:
         """Create the environment.
 
@@ -65,9 +69,19 @@ class HokmEnv(gym.Env[Observation, np.integer]):
                 learner's entry is ignored. Defaults to uniform random
                 policies.
             trick_reward: Magnitude of optional +/- shaping per trick won/lost.
+                Every trick pays the same, whether it decides a close hand or
+                mops up an already-settled one, so a large value can dominate
+                the sparse match outcome and reward tactically meaningless
+                tricks; ``hand_reward`` is the coarser, usually preferable
+                alternative.
             render_mode: ``"human"`` or ``None``.
             opponent_provider: Optional callable invoked on every ``reset()``
                 to draw a fresh length-4 opponent list.
+            hand_reward: Magnitude of optional +/- shaping per hand won/lost
+                (a hand is 13 tricks; a match is played to 7 hand-level game
+                points). Coarser than ``trick_reward`` and closer to what
+                actually matters -- it rewards winning the hand, not padding
+                a trick count that is already decided.
 
         Raises:
             ValueError: If the seat is out of range or a mask bug surfaces.
@@ -92,6 +106,7 @@ class HokmEnv(gym.Env[Observation, np.integer]):
         self.opponents = list(opponents)
         self.opponent_provider = opponent_provider
         self.trick_reward = trick_reward
+        self.hand_reward = hand_reward
         self.render_mode = render_mode
         self.action_space = MaskedDiscrete(NUM_ACTIONS, legal_provider=self._sample_legal_actions)
         # spaces.Dict is invariant; the TypedDict Observation describes the
@@ -262,10 +277,13 @@ class HokmEnv(gym.Env[Observation, np.integer]):
                 self._pending_reward += self.trick_reward
             else:
                 self._pending_reward -= self.trick_reward
-        if outcome.hand_complete:
-            # Hand outcomes pay nothing under the sparse default; only the
-            # match result is rewarded.
-            pass
+        if outcome.hand_complete and self.hand_reward:
+            hand_winner = outcome.hand_winner_team
+            assert hand_winner is not None
+            if hand_winner == own:
+                self._pending_reward += self.hand_reward
+            else:
+                self._pending_reward -= self.hand_reward
         if outcome.match_complete:
             match_winner = outcome.match_winner_team
             assert match_winner is not None

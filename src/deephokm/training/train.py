@@ -34,7 +34,7 @@ from deephokm.training.callbacks import (
 )
 from deephokm.training.env_factory import make_env, make_vec_env
 from deephokm.training.gauntlet_workers import OpponentSpec
-from deephokm.training.selfplay import P_LATEST, P_POOL, P_RANDOM, PoolOpponentProvider
+from deephokm.training.selfplay import P_GREEDY, P_LATEST, P_POOL, P_RANDOM, PoolOpponentProvider
 
 DEFAULT_OUT_DIR = Path("checkpoints")
 SNAPSHOT_EVERY = 100_000
@@ -53,15 +53,22 @@ EVAL_WORKERS = 10
 # scales with the run instead of shrinking as workers are added.
 DEFAULT_N_STEPS = 256
 
-# Trick-level shaping and a shorter discount horizon, not the sparse-reward
-# gamma=0.997 reference default. A controlled 400k-step comparison (recorded
-# in REVIEW_LOG.local.md) found the sparse default still at chance (0.48-0.57
-# win rate vs random) while trick_reward=0.05 with gamma=0.95 reached 0.58-0.67
-# in the same budget: a +/-1 match outcome roughly 150 steps away carries
-# almost no gradient at gamma=0.997, so the dense per-trick signal is what
-# actually teaches trick-taking within a reasonable step budget.
-DEFAULT_TRICK_REWARD = 0.05
-DEFAULT_GAMMA = 0.95
+# The earlier deviation to gamma=0.95 (paired with trick_reward=0.05) was a
+# mistake: it was reasoned from a claim that a +/-1 match outcome ~150 steps
+# away carries "almost no gradient" at gamma=0.997. That claim was checked
+# directly (0.997**150 ~= 0.64 of the reward retained, vs 0.95**150 ~= 0.0005)
+# and is backwards — 0.997 keeps most of the credit over that horizon, 0.95
+# destroys nearly all of it. Reverted to the reference gamma=0.997.
+#
+# Per-trick shaping still has the flaw described in HokmEnv's docstring: it
+# pays the same for a trick that decided a close hand as for one that mops
+# up an already-settled one, so it can teach the policy to chase tricks that
+# no longer matter. hand_reward is the coarser, better-aligned signal — it
+# only pays out at the point a hand's outcome is actually decided — so it
+# replaces trick-level shaping as the default and trick_reward defaults to 0.
+DEFAULT_TRICK_REWARD = 0.0
+DEFAULT_HAND_REWARD = 0.15
+DEFAULT_GAMMA = 0.997
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -71,6 +78,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--n-envs", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--trick-reward", type=float, default=DEFAULT_TRICK_REWARD)
+    parser.add_argument("--hand-reward", type=float, default=DEFAULT_HAND_REWARD)
     parser.add_argument("--gamma", type=float, default=DEFAULT_GAMMA)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--resume", type=Path, default=None)
@@ -88,39 +96,49 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def hyperparameters(n_steps: int = DEFAULT_N_STEPS, gamma: float = DEFAULT_GAMMA) -> dict[str, Any]:
     """Return the PPO hyperparameters actually used for training.
 
-    These start from the project's reference set. Three deviations are
-    deliberate, each forced by evidence recorded in ``REVIEW_LOG.local.md``:
+    ``gamma`` and ``gae_lambda`` are back at the reference values (see the
+    comment on :data:`DEFAULT_GAMMA` for why the earlier gamma=0.95 deviation
+    was reverted). The remaining deviations from the reference set are each
+    forced by evidence recorded in ``REVIEW_LOG.local.md``:
 
-    - ``target_kl`` stops the epoch loop once an update has moved the policy
-      by more than 0.03 nats. The first full run climbed to about 68% against
-      random play and then collapsed back to chance while ``approx_kl`` grew
-      past 0.4 — ten epochs at a fixed 3e-4 over a 56-action masked space
-      walks the policy far outside the trust region every update.
-    - ``learning_rate`` decays linearly to zero across the run, so late
-      updates refine instead of overwriting.
-    - ``gamma`` (see :data:`DEFAULT_GAMMA`) and the paired ``trick_reward``
-      shaping default: at the reference gamma=0.997 a +/-1 match outcome some
-      150 steps away carries almost no gradient, so a controlled comparison
-      found the sparse-reward default still at chance after 400k steps.
+    - ``n_epochs`` is cut from 10 to 4 and ``batch_size`` raised from 512 to
+      1024: the first full run climbed to about 68% against random play and
+      then collapsed back to chance while ``approx_kl`` grew past 0.4 — ten
+      epochs of gradient steps over the same 2048-sample rollout, at a fixed
+      3e-4 learning rate over a 56-action masked space, walks the policy far
+      outside the trust region every update. Fewer, larger-batch epochs
+      directly reduces how far a single update can move the policy, rather
+      than only capping the damage after the fact.
+    - ``target_kl`` remains as a safety net on top of that, tightened from
+      0.03 to 0.02 nats per update.
+    - ``learning_rate`` decays linearly to a floor of 3e-5 (not to zero): a
+      schedule that reaches exactly zero stops learning for the last portion
+      of the run, which just wastes that step budget.
+    - ``ent_coef`` stays fixed at 0.01: unlike ``learning_rate``, ``ent_coef``
+      is consumed as a plain float inside PPO's loss (see
+      ``OnPolicyAlgorithm``), not run through a schedule, so annealing it
+      would require patching the training loop rather than passing a
+      callable — out of scope here without a demonstrated need.
 
-    ``n_steps`` is the fourth: see :data:`DEFAULT_N_STEPS`.
+    ``n_steps`` is unchanged from the vec-env scaling rationale in
+    :data:`DEFAULT_N_STEPS`.
 
     Args:
         n_steps: Rollout length per worker.
         gamma: Discount factor.
     """
     return {
-        "learning_rate": LinearSchedule(3e-4, 0.0, 1.0),
+        "learning_rate": LinearSchedule(3e-4, 3e-5, 1.0),
         "n_steps": n_steps,
-        "batch_size": 512,
-        "n_epochs": 10,
+        "batch_size": 1024,
+        "n_epochs": 4,
         "gamma": gamma,
         "gae_lambda": 0.95,
         "clip_range": 0.2,
         "ent_coef": 0.01,
         "vf_coef": 0.5,
         "max_grad_norm": 0.5,
-        "target_kl": 0.03,
+        "target_kl": 0.02,
     }
 
 
@@ -129,7 +147,7 @@ def hyperparameters_for_config(
 ) -> dict[str, Any]:
     """Return the hyperparameters in a JSON-serializable form."""
     values = dict(hyperparameters(n_steps, gamma))
-    values["learning_rate"] = "linear 3e-4 -> 0"
+    values["learning_rate"] = "linear 3e-4 -> 3e-5"
     return values
 
 
@@ -140,6 +158,7 @@ def build_config(args: argparse.Namespace) -> dict[str, Any]:
         "n_envs": args.n_envs,
         "seed": args.seed,
         "trick_reward": args.trick_reward,
+        "hand_reward": args.hand_reward,
         "out_dir": str(args.out_dir),
         "resume": str(args.resume) if args.resume else None,
         "snapshot_every": args.snapshot_every,
@@ -150,7 +169,12 @@ def build_config(args: argparse.Namespace) -> dict[str, Any]:
         "eval_games": args.eval_games,
         "hyperparameters": hyperparameters_for_config(args.n_steps, args.gamma),
         "observation_layout": "hand(13) trick(4) history(48) context(5)",
-        "opponent_mix": {"latest": P_LATEST, "pool": P_POOL, "random": P_RANDOM},
+        "opponent_mix": {
+            "latest": P_LATEST,
+            "pool": P_POOL,
+            "greedy": P_GREEDY,
+            "random": P_RANDOM,
+        },
         "network": {
             "extractor": "HokmTransformerExtractor",
             "d_model": 128,
@@ -220,9 +244,13 @@ def main(argv: list[str] | None = None) -> None:
         seed=args.seed,
         opponent_provider=provider,
         trick_reward=args.trick_reward,
+        hand_reward=args.hand_reward,
     )
 
     def eval_env_factory() -> HokmEnv:
+        # Deliberately unshaped: EvalCallback's mean reward is the metric used
+        # for best-model selection, and it should reflect the actual +/-1
+        # match outcome, not training-time shaping.
         return make_env(rank=0, seed=args.seed + 10_000)
 
     model_kwargs: dict[str, Any] = dict(

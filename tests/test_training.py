@@ -10,6 +10,7 @@ from collections import Counter
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 from sb3_contrib import MaskablePPO
 from stable_baselines3.common.callbacks import CallbackList
@@ -17,6 +18,7 @@ from stable_baselines3.common.logger import KVWriter, Logger
 
 from deephokm.env import HokmEnv
 from deephokm.nn.policy import HokmMaskablePolicy
+from deephokm.policies.greedy_policy import GreedyPolicy
 from deephokm.policies.random_policy import RandomPolicy
 from deephokm.rules.state import NUM_SEATS
 from deephokm.training.callbacks import (
@@ -38,6 +40,7 @@ from deephokm.training.selfplay import (
 )
 from deephokm.training.train import (
     DEFAULT_GAMMA,
+    DEFAULT_HAND_REWARD,
     DEFAULT_N_STEPS,
     DEFAULT_TRICK_REWARD,
     build_config,
@@ -93,19 +96,26 @@ def _write_fake_snapshots(directory: Path, steps: list[int]) -> list[Path]:
 
 
 def test_provider_falls_back_to_random_on_unreadable_snapshot(tmp_path: Path) -> None:
-    """A half-written snapshot must not crash a worker."""
+    """A half-written snapshot must not crash a worker.
+
+    A draw that rolls into the snapshot arms (latest/pool) and finds the
+    file unreadable falls back to RandomPolicy; a draw that rolls into the
+    greedy arm never touches the snapshot at all and legitimately returns
+    GreedyPolicy. Either is a safe outcome; a SnapshotPolicy (or a crash)
+    is not.
+    """
     _write_fake_snapshots(tmp_path, [1000])
     provider = PoolOpponentProvider(tmp_path, capacity=10, seed=0)
     drawn = provider()
     assert len(drawn) == NUM_SEATS
-    assert all(isinstance(p, RandomPolicy) for p in drawn)
+    assert all(isinstance(p, RandomPolicy | GreedyPolicy) for p in drawn)
 
 
-def test_provider_returns_random_when_directory_is_empty(tmp_path: Path) -> None:
+def test_provider_returns_random_or_greedy_when_directory_is_empty(tmp_path: Path) -> None:
     provider = PoolOpponentProvider(tmp_path / "missing", capacity=10, seed=0)
     drawn = provider()
     assert len(drawn) == NUM_SEATS
-    assert all(isinstance(p, RandomPolicy) for p in drawn)
+    assert all(isinstance(p, RandomPolicy | GreedyPolicy) for p in drawn)
 
 
 def test_provider_keeps_only_the_newest_capacity_snapshots(tmp_path: Path) -> None:
@@ -135,12 +145,15 @@ def test_provider_picks_up_snapshots_written_after_construction(tmp_path: Path) 
     env.close()
 
     assert provider.refresh(), "snapshots written after construction must be visible"
-    drawn = provider()
-    assert any(isinstance(policy, SnapshotPolicy) for policy in drawn)
+    # A single draw has only a P_LATEST + P_POOL chance of landing on a
+    # snapshot (the rest goes to GreedyPolicy/RandomPolicy); several draws
+    # make the check robust instead of occasionally flaky.
+    drawn_over_several_calls = [policy for _ in range(20) for policy in provider()]
+    assert any(isinstance(policy, SnapshotPolicy) for policy in drawn_over_several_calls)
 
 
-def test_provider_draw_mix_is_about_sixty_thirty_ten(tmp_path: Path) -> None:
-    """With snapshots present, the per-seat mix must be ~60/30/10."""
+def test_provider_draw_mix_matches_the_documented_probabilities(tmp_path: Path) -> None:
+    """With snapshots present, the per-team draw mix matches the documented probabilities."""
     _write_fake_snapshots(tmp_path, [100, 200, 300, 400])
     provider = PoolOpponentProvider(tmp_path, capacity=10, seed=42)
     provider.refresh()
@@ -153,17 +166,29 @@ def test_provider_draw_mix_is_about_sixty_thirty_ten(tmp_path: Path) -> None:
     latest = provider.refresh()[-1].name
     n = 4000
     for _ in range(n):
-        for policy in provider():
+        seats = provider()
+        # Each call draws exactly 2 independent team policies (seats 0/2
+        # share one, seats 1/3 share the other); count each draw once.
+        assert seats[0] is seats[2]
+        assert seats[1] is seats[3]
+        for policy in (seats[0], seats[1]):
             if isinstance(policy, RandomPolicy):
                 counts["random"] += 1
+            elif isinstance(policy, GreedyPolicy):
+                counts["greedy"] += 1
             else:
                 counts["snapshot"] += 1
                 if policy == latest:
                     counts["latest"] += 1
-    total = n * NUM_SEATS
-    assert 0.85 < counts["snapshot"] / total < 0.95, dict(counts)
-    # Roughly 60 of the 90 snapshot draws are the newest snapshot.
-    assert counts["latest"] / counts["snapshot"] > 0.5, dict(counts)
+    total = n * 2
+    snapshot_share = counts["snapshot"] / total
+    greedy_share = counts["greedy"] / total
+    random_share = counts["random"] / total
+    assert 0.60 < snapshot_share < 0.70, dict(counts)  # P_LATEST + P_POOL = 0.65
+    assert 0.20 < greedy_share < 0.30, dict(counts)  # P_GREEDY = 0.25
+    assert 0.05 < random_share < 0.15, dict(counts)  # P_RANDOM = 0.10
+    # Of the snapshot draws, P_LATEST / (P_LATEST + P_POOL) = 0.45/0.65 are latest.
+    assert counts["latest"] / counts["snapshot"] > 0.55, dict(counts)
 
 
 def test_env_redraws_opponents_every_reset() -> None:
@@ -208,13 +233,17 @@ def test_vec_env_workers_see_snapshots_written_after_fork(tmp_path: Path) -> Non
         model.learn(total_timesteps=192, callback=CallbackList([callback]))
         env.close()
 
-        venv.reset()
-        kinds = venv.env_method("_draw_opponents")
-        assert len(kinds) == 2
-        names = venv.get_attr("opponents")
-        assert any(
-            type(policy).__name__ == "SnapshotPolicy" for seats in names for policy in seats
-        ), "workers must load snapshots written after the fork"
+        found_snapshot = False
+        for _ in range(10):
+            venv.reset()
+            venv.env_method("_draw_opponents")
+            names = venv.get_attr("opponents")
+            if any(
+                type(policy).__name__ == "SnapshotPolicy" for seats in names for policy in seats
+            ):
+                found_snapshot = True
+                break
+        assert found_snapshot, "workers must load snapshots written after the fork"
     finally:
         venv.close()
 
@@ -336,9 +365,11 @@ def test_hyperparameters_match_spec() -> None:
     hp = hyperparameters()
     assert hp["n_steps"] == DEFAULT_N_STEPS
     assert hyperparameters(1024)["n_steps"] == 1024
-    assert hp["batch_size"] == 512
-    assert hp["n_epochs"] == 10
+    # gamma/gae_lambda are the reference values; DEFAULT_GAMMA itself was
+    # reverted from an earlier gamma=0.95 deviation that turned out to rest
+    # on backwards math (see the comment on DEFAULT_GAMMA in train.py).
     assert hp["gamma"] == DEFAULT_GAMMA
+    assert DEFAULT_GAMMA == 0.997
     assert hyperparameters(gamma=0.997)["gamma"] == 0.997
     assert hp["gae_lambda"] == 0.95
     assert hp["clip_range"] == 0.2
@@ -347,12 +378,14 @@ def test_hyperparameters_match_spec() -> None:
     assert hp["max_grad_norm"] == 0.5
     # Deviations from the reference set, each forced by evidence recorded in
     # REVIEW_LOG.local.md.
-    assert hp["target_kl"] == 0.03
+    assert hp["batch_size"] == 1024
+    assert hp["n_epochs"] == 4
+    assert hp["target_kl"] == 0.02
     schedule = hp["learning_rate"]
     assert callable(schedule)
-    # progress_remaining runs 1 -> 0 across training.
+    # progress_remaining runs 1 -> 0 across training; the floor is 3e-5, not 0.
     assert schedule(1.0) == 3e-4
-    assert schedule(0.0) == 0.0
+    assert schedule(0.0) == pytest.approx(3e-5)
 
 
 def test_hyperparameters_for_config_is_json_safe() -> None:
@@ -372,6 +405,7 @@ def test_parse_args_defaults() -> None:
     assert args.n_envs == 8
     assert args.seed == 0
     assert args.trick_reward == DEFAULT_TRICK_REWARD
+    assert args.hand_reward == DEFAULT_HAND_REWARD
     assert args.gamma == DEFAULT_GAMMA
     assert args.device == "cuda"
 
@@ -381,9 +415,12 @@ def test_build_config_covers_reproducibility() -> None:
     config = build_config(args)
     assert config["total_timesteps"] == 100
     assert config["seed"] == 3
+    assert config["trick_reward"] == DEFAULT_TRICK_REWARD
+    assert config["hand_reward"] == DEFAULT_HAND_REWARD
     assert config["hyperparameters"] == hyperparameters_for_config()
     assert "network" in config and "observation_layout" in config
-    assert config["opponent_mix"]["latest"] == 0.6
+    assert config["opponent_mix"]["latest"] == 0.45
+    assert config["opponent_mix"]["greedy"] == 0.25
 
 
 def test_random_policy_reset_after_pool_use() -> None:

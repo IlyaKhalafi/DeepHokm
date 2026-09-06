@@ -30,12 +30,13 @@ import torch as th
 from deephokm.env.spaces import Observation
 from deephokm.nn.policy import HokmMaskablePolicy
 from deephokm.policies.base import HokmPolicy
+from deephokm.policies.greedy_policy import GreedyPolicy
 from deephokm.policies.random_policy import RandomPolicy
-from deephokm.rules.state import NUM_SEATS
 
-P_LATEST = 0.6
-P_POOL = 0.3
-P_RANDOM = 0.1
+P_LATEST = 0.45
+P_POOL = 0.20
+P_GREEDY = 0.25
+P_RANDOM = 0.10
 
 SNAPSHOT_GLOB = "snapshot_*.zip"
 
@@ -142,11 +143,19 @@ class PoolOpponentProvider:
     ``opponent_provider`` and called once per ``reset()``. It rescans the
     snapshot directory (cheaply, and at most every ``refresh_every`` calls)
     so that snapshots written by the training process reach the forked
-    workers, then draws one policy per seat: ``P_LATEST`` the newest
-    snapshot, ``P_POOL`` uniform over the retained pool, ``P_RANDOM`` a fresh
-    random policy. Drawing per seat rather than per episode means the learner
-    meets mixed-strength tables, which is what keeps the partner seat from
-    co-adapting to a single opponent generation.
+    workers, then draws one policy **per team**, not per seat: ``P_LATEST``
+    the newest snapshot, ``P_POOL`` uniform over the retained pool,
+    ``P_GREEDY`` the scripted, non-learning :class:`GreedyPolicy` baseline,
+    ``P_RANDOM`` a fresh random policy. Both seats of a team share the same
+    draw, so the learner's partner plays one coherent style for the whole
+    episode instead of an independent per-seat coin flip -- with a naive
+    per-seat draw, roughly 1 - (1 - P_RANDOM)^3 of tables would carry at
+    least one uniformly-random seat among the other three, which teaches
+    the learner to exploit noise rather than play alongside a consistent
+    partner. ``GreedyPolicy`` is drawn during training, not just held back
+    for evaluation: a policy that never sees disciplined, non-self-play
+    opponents during training has no pressure to learn the tactics that
+    beat one.
 
     Attributes:
         snapshot_dir: Directory the training process writes snapshots to.
@@ -175,6 +184,7 @@ class PoolOpponentProvider:
         self.capacity = capacity
         self.refresh_every = max(1, refresh_every)
         self.rng = random.Random(seed)
+        self._seed = seed
         self._paths: list[Path] = []
         self._cache: dict[Path, SnapshotPolicy] = {}
         self._calls = 0
@@ -184,6 +194,18 @@ class PoolOpponentProvider:
         state = dict(self.__dict__)
         state["_cache"] = {}
         return state
+
+    def reseed(self, seed: int) -> None:
+        """Reseed the draw RNG (e.g. with a rank-derived seed per worker).
+
+        A provider constructed once and handed to every ``SubprocVecEnv``
+        worker is forked into each subprocess at the *same* RNG state, so
+        every worker's very first draw (before any per-episode ``reset()``
+        advances it) would otherwise pick the identical opponent mix. Called
+        once per worker, right after the fork, to decorrelate that startup
+        draw; per-episode draws are unaffected once training is underway.
+        """
+        self.rng = random.Random(seed)
 
     def refresh(self) -> list[Path]:
         """Rescan the snapshot directory and return the current pool paths."""
@@ -209,32 +231,48 @@ class PoolOpponentProvider:
         if cached is not None:
             return cached
         try:
-            policy = SnapshotPolicy.from_file(path, deterministic=False)
+            policy = SnapshotPolicy.from_file(
+                path, deterministic=False, seed=self.rng.randrange(2**31)
+            )
         except UNREADABLE_SNAPSHOT:
             return None
         self._cache[path] = policy
         return policy
 
     def __call__(self) -> list[HokmPolicy]:
-        """Draw one policy per seat for the next episode."""
+        """Draw one policy per team, applied to both of that team's seats.
+
+        Returns a 4-entry list indexed by seat (matching
+        :class:`~deephokm.env.hokm_env.HokmEnv`'s ``opponents`` contract,
+        which ignores the learner's own seat), but only 2 independent draws
+        happen: seats {0, 2} share one, seats {1, 3} share the other.
+        """
         if self._calls % self.refresh_every == 0:
             self.refresh()
         self._calls += 1
-        return [self._draw() for _ in range(NUM_SEATS)]
+        team_a = self._draw_team()
+        team_b = self._draw_team()
+        return [team_a, team_b, team_a, team_b]
 
-    def _draw(self) -> HokmPolicy:
-        """Draw a single seat's policy from the weighted mix."""
+    def _draw_team(self) -> HokmPolicy:
+        """Draw one team's shared policy from the weighted mix."""
         if self._paths:
             roll = self.rng.random()
-            path = None
             if roll < P_LATEST:
-                path = self._paths[-1]
-            elif roll < P_LATEST + P_POOL:
-                path = self.rng.choice(self._paths)
-            if path is not None:
-                policy = self._load(path)
+                policy = self._load(self._paths[-1])
                 if policy is not None:
                     return policy
+            elif roll < P_LATEST + P_POOL:
+                policy = self._load(self.rng.choice(self._paths))
+                if policy is not None:
+                    return policy
+            elif roll < P_LATEST + P_POOL + P_GREEDY:
+                return GreedyPolicy()
+        elif self.rng.random() < P_GREEDY:
+            # No snapshots yet (run just started): still give GreedyPolicy
+            # its share so training sees a disciplined opponent from step
+            # zero, not only once the pool has something to sample.
+            return GreedyPolicy()
         return RandomPolicy(self.rng.randrange(2**31))
 
 
@@ -253,11 +291,14 @@ class SnapshotPolicy:
         path_str: str = "",
         *,
         deterministic: bool = True,
+        seed: int | None = None,
     ) -> None:
         self.policy = policy
         self.policy.eval()
         self.path_str = path_str
         self.deterministic = deterministic
+        self._seed = seed
+        self._rng = random.Random(seed)
 
     @staticmethod
     def _pin_single_thread() -> None:
@@ -269,7 +310,9 @@ class SnapshotPolicy:
             th.set_num_threads(1)
 
     @classmethod
-    def from_file(cls, path: Path, *, deterministic: bool = True) -> SnapshotPolicy:
+    def from_file(
+        cls, path: Path, *, deterministic: bool = True, seed: int | None = None
+    ) -> SnapshotPolicy:
         """Load a saved policy zip into a snapshot.
 
         Args:
@@ -277,25 +320,48 @@ class SnapshotPolicy:
             deterministic: Whether the snapshot plays its argmax action.
                 Evaluation wants the argmax; self-play opponents sample, so
                 the learner meets varied lines instead of one frozen script.
+            seed: Seed for the stochastic-sampling stream (see :meth:`act`);
+                ignored when ``deterministic=True``, since argmax play has no
+                randomness to seed.
         """
         cls._pin_single_thread()
         policy = HokmMaskablePolicy.load(str(path), device="cpu")
-        return cls(policy, path_str=str(path), deterministic=deterministic)
+        return cls(policy, path_str=str(path), deterministic=deterministic, seed=seed)
 
     def reset(self, seed: int | None = None) -> None:
-        """No-op: the snapshot policy is stateless across episodes."""
+        """Restart the stochastic-sampling stream (optionally from a new seed).
+
+        A deterministic (argmax) snapshot has no randomness to reset, so this
+        is a no-op in that mode; a sampling snapshot's action stream is fully
+        seeded by :meth:`act`'s scoped reseed below, so a seeded ``reset()``
+        replays an episode against it exactly, matching every other
+        :class:`~deephokm.policies.base.HokmPolicy` in this codebase.
+        """
+        self._rng = random.Random(self._seed if seed is None else seed)
 
     def act(self, observation: Observation, action_mask: np.ndarray) -> int:
         """Return the snapshot's action for the observation."""
         obs = {key: np.asarray(value)[None, ...] for key, value in observation.items()}
         mask = np.asarray(action_mask, dtype=bool)[None, ...]
         with th.no_grad():
-            actions, _ = self.policy.predict(
-                obs, action_masks=mask, deterministic=self.deterministic
-            )
+            if self.deterministic:
+                actions, _ = self.policy.predict(obs, action_masks=mask, deterministic=True)
+            else:
+                # predict(deterministic=False) samples from torch's global
+                # RNG, which this policy does not own (the calling process
+                # might be the training loop itself, mid-rollout). Save and
+                # restore the global state around a per-instance reseed so
+                # this snapshot's own play is reproducible under a seeded
+                # env.reset() without perturbing anyone else's draws.
+                global_state = th.random.get_rng_state()
+                th.manual_seed(self._rng.randrange(2**31))
+                try:
+                    actions, _ = self.policy.predict(obs, action_masks=mask, deterministic=False)
+                finally:
+                    th.random.set_rng_state(global_state)
         return int(np.asarray(actions).reshape(-1)[0])
 
 
-def opponent_probability_check() -> tuple[float, float, float]:
-    """Return the (latest, pool, random) sampling probabilities."""
-    return P_LATEST, P_POOL, P_RANDOM
+def opponent_probability_check() -> tuple[float, float, float, float]:
+    """Return the (latest, pool, greedy, random) team-draw probabilities."""
+    return P_LATEST, P_POOL, P_GREEDY, P_RANDOM

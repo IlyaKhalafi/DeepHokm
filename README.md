@@ -53,8 +53,9 @@ scalars (`hand`, `seen`, `trick`, `trick_play`, `history`, `trump`, `phase`,
 action space is `Discrete(56)` (52 card plays + 4 trump declarations) with
 legality masks available via `env.action_masks()` and `info["action_mask"]`.
 Illegal actions raise `ValueError` rather than being resampled. Rewards are
-sparse by default: +1 for winning the match, -1 for losing; optional per-trick
-shaping via the `trick_reward` constructor argument.
+sparse by default: +1 for winning the match, -1 for losing; optional shaping
+via the `trick_reward` (per-trick) and `hand_reward` (per-hand) constructor
+arguments — see *Training* for which one the CLI actually uses.
 
 `history` carries the current hand's completed tricks as card ids in reverse
 play order (most recent first, `-1` padded, 48 slots). It is redundant with
@@ -121,14 +122,19 @@ make train ARGS="--total-timesteps 5000000 --n-envs 8 --seed 0 \
 The CLI dumps a reproducible `config.json` next to the checkpoints and
 resumes via `--resume <checkpoint.zip>`.
 
-**Self-play.** Every environment re-draws its three opponent seats at each
-`reset()`: 60% the latest snapshot, 30% uniform over the retained pool, 10% a
-fresh random policy. Snapshots are written atomically into the run's
-`opponents/` directory and the workers rescan that directory, because the
-environments run in forked subprocesses and a pool held as an in-process
-Python object would never reach them. Snapshot opponents sample rather than
-take their argmax, so the learner meets varied lines instead of one frozen
-script.
+**Self-play.** Every environment re-draws its opponents at each `reset()` as
+one team-coherent pair rather than four independent seats: 45% the latest
+snapshot, 20% uniform over the retained pool, 25% the scripted `GreedyPolicy`,
+10% a fresh random policy — the same draw fills both seats of one team, so a
+table is never a mix of "one partner + two mismatched opponents". Snapshots
+are written atomically into the run's `opponents/` directory and the workers
+rescan that directory, because the environments run in forked subprocesses
+and a pool held as an in-process Python object would never reach them.
+Snapshot opponents sample rather than take their argmax, so the learner meets
+varied lines instead of one frozen script. `GreedyPolicy` was folded into the
+primary mix (rather than only appearing at evaluation time) specifically
+because the first completed run's win rate against it never improved — see
+*Results* for that experiment.
 
 **Evaluation.** The gauntlet plays the learner in one seat against a table of
 the named opponent — the scripted `GreedyPolicy` also fills the learner's own
@@ -138,14 +144,29 @@ each, every `--eval-every` environment steps, sharded across worker
 processes. Figures render with `make plot`.
 
 Hyperparameters (logged in every config dump): learning_rate 3e-4 decaying
-linearly to 0, n_steps 256 per worker, batch_size 512, n_epochs 10,
-target_kl 0.03, gamma 0.95, gae_lambda 0.95, clip_range 0.2, ent_coef 0.01,
-vf_coef 0.5, max_grad_norm 0.5, trick_reward 0.05. Four values deviate from
-the reference set (learning-rate decay, `target_kl`, `n_steps`, and the
-`gamma`/`trick_reward` pair) — each forced by evidence recorded during
-development; see *Results* and `REVIEW_LOG.local.md` for the comparison that
-produced them. `--gamma 0.997 --trick-reward 0.0` restores the original
-sparse-reward reference config for anyone who wants to reproduce it.
+linearly to a 3e-5 floor, n_steps 256 per worker, batch_size 1024, n_epochs 4,
+target_kl 0.02, gamma 0.997, gae_lambda 0.95, clip_range 0.2, ent_coef 0.01,
+vf_coef 0.5, max_grad_norm 0.5, trick_reward 0.0, hand_reward 0.15.
+
+`gamma` and `gae_lambda` are the reference values — an earlier run trained at
+`gamma=0.95` (paired with `trick_reward=0.05`) on the theory that a +/-1 match
+outcome ~150 steps away carries almost no gradient at the reference
+`gamma=0.997`. That theory was checked directly and is backwards:
+`0.997**150 ≈ 0.64` of the reward is retained over that horizon, versus
+`0.95**150 ≈ 0.0005` — 0.95 is the value that destroys almost all long-horizon
+credit, not 0.997. `trick_reward` is retired in favor of `hand_reward`: it
+pays the same amount whether a trick decided a close hand or mopped up one
+already settled, which can teach the policy to chase tricks that no longer
+matter; `hand_reward` only pays out when a hand's outcome is actually decided.
+`n_steps`, `batch_size`, `n_epochs`, `target_kl` and the learning-rate floor
+still deviate from the reference set, forced by evidence recorded during
+development (the vec-env rollout-size rationale in `train.py:DEFAULT_N_STEPS`,
+and a KL blowup during the first full run that motivated fewer, larger-batch
+epochs plus a hard trust-region cap — see `train.py:hyperparameters` and
+`REVIEW_LOG.local.md`). `ent_coef` is not annealed: sb3-contrib's
+`MaskablePPO` consumes it as a plain float in the loss, not through a
+schedule like `learning_rate`, so annealing it would need a training-loop
+patch rather than a constructor argument.
 
 ## Web UI
 
@@ -283,14 +304,15 @@ per-machine values live in a gitignored `.env`.
   latest snapshot, 30% pool, 10% random) never includes a disciplined,
   non-self-play style during training, only at evaluation time; a targeted
   fine-tune experiment (see *Results*) suggests this is not a quick fix.
-- Trick-reward shaping trades off long-horizon match strategy for
-  learnability: `gamma=0.95` discounts the sparse +/-1 match outcome almost
-  to nothing by the time a hand is decided, so the policy optimizes hand-level
-  and trick-level play rather than match-level strategy (e.g. deliberately
-  losing a hand to keep the hakem). `--gamma 0.997 --trick-reward 0.0`
-  restores the original sparse-reward objective for anyone who wants to train
-  toward match-level strategy directly, at the cost of a much larger step
-  budget.
+- The results above were produced under the earlier `gamma=0.95` /
+  `trick_reward=0.05` configuration, which (see *Training*) rested on a
+  mathematically backwards discounting argument. The current default
+  configuration (`gamma=0.997`, `hand_reward=0.15`, `trick_reward=0.0`, the
+  team-coherent self-play mix with `GreedyPolicy` folded in from step zero,
+  and the revised PPO schedule) has not yet completed a full run at the time
+  of writing; this section will be replaced with that run's numbers once it
+  finishes. `--trick-reward 0.05 --hand-reward 0.0` reproduces the retired
+  per-trick shaping for comparison.
 - No kot/bustom scoring; the web UI plays a single match per game id with no
   reconnection.
 - The evaluation gauntlet reports deterministic-policy win rates; stochastic
