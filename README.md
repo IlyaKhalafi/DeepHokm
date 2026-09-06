@@ -122,6 +122,29 @@ make train ARGS="--total-timesteps 5000000 --n-envs 8 --seed 0 \
 The CLI dumps a reproducible `config.json` next to the checkpoints and
 resumes via `--resume <checkpoint.zip>`.
 
+**Behavioral-cloning warm start.** Two straight from-scratch self-play runs
+(see *Results*) plateaued at essentially the same win rate against
+`GreedyPolicy` regardless of gamma, reward shaping, or that opponent's
+training-time share — evidence that RL from a random initialization may
+simply need a better starting point against a disciplined, non-learning
+style, not just more self-play tuning. `deephokm.training.behavioral_cloning`
+collects a dataset from `GreedyPolicy`-vs-`GreedyPolicy`-vs-`GreedyPolicy`-vs-
+`GreedyPolicy` rollouts (every seat played by a fresh, independently seeded
+instance) and fits a fresh policy to imitate it by supervised cross-entropy,
+saving a normal `MaskablePPO` checkpoint:
+
+```bash
+make pretrain-bc ARGS="--n-matches 3000 --epochs 8 --out-path checkpoints/bc_pretrained.zip"
+make train ARGS="--resume checkpoints/bc_pretrained.zip --total-timesteps 8000000 --n-envs 32 \
+  --out-dir checkpoints/run2 --tensorboard-log logs/tb"
+```
+
+The saved checkpoint's own hyperparameters (from the throwaway model used
+only to hold a correctly-constructed policy) are discarded on `--resume`:
+`MaskablePPO.load()` applies the loaded weights on top of the real training
+run's hyperparameters, so PPO fine-tuning starts from a policy that already
+plays a disciplined game rather than from random initialization.
+
 **Self-play.** Every environment re-draws its opponents at each `reset()` as
 one team-coherent pair rather than four independent seats: 55% the latest
 snapshot, 25% uniform over the retained pool, 10% the scripted `GreedyPolicy`,
@@ -289,9 +312,47 @@ distinguish from noise) at a properly pinned, non-decaying learning rate.
 That rules out the cheapest explanation (the policy has simply never seen
 this opponent style) and points at something that needs either much longer
 exposure or a redesigned self-play mix from the start of a run, not a late
-graft onto an already-converged policy — the next experiment worth running
-is a fresh run with `GreedyPolicy` folded into the primary self-play
-opponent pool from step zero.
+graft onto an already-converged policy.
+
+**Second completed run (current model).** 8M steps (~3.4 hours on GPU 6),
+seed 0, 32 parallel environments, the corrected hyperparameters described
+under *Training* (`gamma=0.997`, `hand_reward=0.15`, `trick_reward=0.0`,
+team-coherent self-play with `GreedyPolicy` folded into the primary mix).
+An intermediate attempt at `P_GREEDY=0.25` was aborted at 4.75M/8M steps
+after the gauntlet showed no improving trend against either random or
+greedy for the entire first 60% of the run — see `REVIEW_LOG.local.md` for
+that data. Cutting `P_GREEDY` to 0.10 and relaunching produced a stable,
+non-stalled run; the table below is the mean of all 33 gauntlet rounds
+logged across the full run (`figures/gauntlet_win_rates.png` /
+`figures/training_scalars.png`, regenerate with `make plot`).
+
+| Opponent        | Win rate (mean of 33 rounds) | Range       |
+| --------------- | ----------------------------- | ----------- |
+| Random policy   | 0.61                          | 0.50 - 0.70 |
+| Greedy baseline | 0.13                          | 0.06 - 0.24 |
+| First snapshot  | 0.61                          | 0.52 - 0.72 |
+| Latest snapshot | 0.51                          | 0.43 - 0.60 |
+
+Against the >= 80% (random) / >= 55% (first snapshot) targets: the first
+snapshot target is met on average; the random-policy target is not, and the
+run never approached it — win rate vs. random oscillates in a 0.50-0.70
+band for the entire 8M steps with no visible upward trend past the first
+250k-step evaluation, a materially lower ceiling than the earlier run's
+0.65-0.81 plateau. Win rate vs. greedy (mean 0.13, range 0.06-0.24) is
+statistically indistinguishable from the earlier run's 0.09-0.23 band:
+folding `GreedyPolicy` into training at a 10% share avoided the outright
+stall seen at 25%, but did not produce the hoped-for improvement against it
+either. Correcting the mathematically-backwards gamma and replacing
+trick-level shaping with hand-level shaping did not, on this evidence,
+raise the ceiling on win rate against either a random or a disciplined
+opponent — it produced a run that trains stably (no stall, no collapse)
+but plateaus at a similar level to the run it replaced. RL from a
+from-scratch random initialization may simply need far more than 8M steps,
+or a materially different self-play curriculum, to discover disciplined
+play on its own — see *Training* for the behavioral-cloning warm start
+built to test that directly (a supervised fit to `GreedyPolicy` before any
+RL, rather than more self-play tuning); its own run and results are not yet
+recorded here.
 
 ## Configuration
 

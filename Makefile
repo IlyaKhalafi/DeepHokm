@@ -66,6 +66,9 @@ bench:  ## Benchmark environment throughput
 train:  ## Run self-play training (extra flags via ARGS="...")
 	uv run python -m deephokm.training.train $(ARGS)
 
+pretrain-bc:  ## Behavioral-cloning warm start against GreedyPolicy (extra flags via ARGS="...")
+	uv run python -m deephokm.training.behavioral_cloning $(ARGS)
+
 plot:  ## Render training figures from TensorBoard logs
 	uv run python scripts/plot_results.py $(ARGS)
 
