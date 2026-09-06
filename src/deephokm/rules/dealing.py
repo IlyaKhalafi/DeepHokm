@@ -94,11 +94,12 @@ def deal_remaining(deck: list[int], hakem: int, hands: list[list[int]]) -> None:
 
 
 def new_hand(deck: list[int], hakem: int) -> HandState:
-    """Create a fresh :class:`HandState` with the full deal applied.
+    """Create a fresh :class:`HandState` with only the hakem's opening 5 dealt.
 
-    Trump is left undeclared (``TRUMP_CALL`` phase); the caller sets it via the
-    engine once the hakem declares.
+    The other 47 cards stay in ``pending_deck`` — undealt to any seat — until
+    the hakem declares trump; the engine calls :func:`deal_remaining` on that
+    pending deck once the trump action is applied. Trump is left undeclared
+    (``TRUMP_CALL`` phase).
     """
     hands = deal_initial(deck, hakem)
-    deal_remaining(deck[HAKEM_FIRST_BATCH:], hakem, hands)
-    return HandState(hands=hands, hakem=hakem)
+    return HandState(hands=hands, hakem=hakem, pending_deck=deck[HAKEM_FIRST_BATCH:])

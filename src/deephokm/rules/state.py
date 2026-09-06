@@ -47,7 +47,9 @@ class HandState:
     """Mutable state of a single hand (deal through the 13th trick).
 
     Attributes:
-        hands: Per-seat sorted lists of card ids currently held.
+        hands: Per-seat sorted lists of card ids currently held. Only the
+            hakem holds cards (the opening 5) until trump is declared; every
+            other seat is empty until then.
         hakem: The seat that declares trump for this hand.
         trump: The declared trump suit id, or ``None`` before declaration.
         leader: The seat leading the current trick.
@@ -57,6 +59,8 @@ class HandState:
         tricks_won: Per-team trick counts for this hand, index 0 = team A.
         trick_winners: Seat that won each completed trick, in order.
         phase: The current phase.
+        pending_deck: The 47 cards not yet dealt, held back until the hakem
+            declares trump so the call is made on 5 cards, not the full hand.
     """
 
     hands: list[list[int]]
@@ -68,6 +72,7 @@ class HandState:
     tricks_won: list[int] = field(default_factory=lambda: [0, 0])
     trick_winners: list[int] = field(default_factory=list)
     phase: Phase = Phase.TRUMP_CALL
+    pending_deck: list[int] = field(default_factory=list)
 
     def remove_card(self, seat: int, card_id: int) -> None:
         """Remove ``card_id`` from ``seat``'s hand, raising if absent."""

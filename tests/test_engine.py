@@ -11,6 +11,7 @@ from deephokm.cards import NUM_CARDS, NUM_SUITS
 from deephokm.rules import HokmEngine, legality
 from deephokm.rules.state import (
     CARDS_PER_PLAYER,
+    HAKEM_FIRST_BATCH,
     NUM_SEATS,
     TRICKS_PER_HAND,
     TRICKS_TO_WIN_HAND,
@@ -35,12 +36,27 @@ def play_random_match(seed: int) -> HokmEngine:
 
 
 def test_start_match_deals_and_sets_trump_call() -> None:
+    """Only the hakem holds cards before trump is called; everyone else waits."""
     eng = make_engine(0)
     assert eng.state.hands.phase is Phase.TRUMP_CALL
     assert eng.state.hakem == eng.state.hands.hakem
+    for seat, hand in enumerate(eng.state.hands.hands):
+        expected = HAKEM_FIRST_BATCH if seat == eng.state.hakem else 0
+        assert len(hand) == expected
+    assert len(eng.state.hands.pending_deck) == NUM_CARDS - HAKEM_FIRST_BATCH
+    assert eng.current_seat() == eng.state.hakem
+
+
+def test_trump_call_deals_the_remaining_47_cards() -> None:
+    """Declaring trump completes the deal to 13 cards each."""
+    eng = make_engine(0)
+    hakem = eng.state.hakem
+    eng.apply_action(legality.trump_action(0), hakem)
     for hand in eng.state.hands.hands:
         assert len(hand) == CARDS_PER_PLAYER
-    assert eng.current_seat() == eng.state.hakem
+    assert eng.state.hands.pending_deck == []
+    all_cards = sorted(c for h in eng.state.hands.hands for c in h)
+    assert all_cards == list(range(NUM_CARDS))
 
 
 def test_first_seat_is_hakem_for_trump() -> None:
@@ -84,10 +100,11 @@ def test_remove_card_direct_reports_missing_card() -> None:
     """The HandState.remove_card guard fires when bypassing the mask."""
     eng = make_engine(4)
     hand_state = eng.state.hands
-    held = hand_state.hands[0][0]
-    hand_state.remove_card(0, held)
+    hakem = hand_state.hakem  # the only seat holding cards before trump is called
+    held = hand_state.hands[hakem][0]
+    hand_state.remove_card(hakem, held)
     with pytest.raises(ValueError, match="does not hold"):
-        hand_state.remove_card(0, held)
+        hand_state.remove_card(hakem, held)
 
 
 def test_playing_removes_card_from_hand() -> None:
@@ -115,6 +132,44 @@ def test_engine_random_match_completes() -> None:
         assert eng.state.winner in (0, 1)
         assert max(eng.state.game_points) == 7
         assert min(eng.state.game_points) < 7
+
+
+def test_action_outcome_tricks_won_reflects_the_completed_hand() -> None:
+    """ActionOutcome.tricks_won must be the ending hand's own final tally.
+
+    Regression test: the hand-completing action immediately deals the next
+    hand as part of applying it, zeroing ``HandState.tricks_won``. A caller
+    reading the *live* engine state after ``apply_action`` returns (as the
+    web UI's render log used to) would see the new hand's [0, 0] instead of
+    the tally that actually decided the hand; ``ActionOutcome.tricks_won``
+    must carry the real number regardless.
+    """
+    for seed in range(20):
+        eng = make_engine(seed)
+        outcome = None
+        while eng.state.winner is None:
+            outcome = eng.apply_action(eng.rng.choice(eng.legal_actions()))
+            if outcome.hand_complete:
+                break
+        assert outcome is not None and outcome.hand_complete
+        assert outcome.tricks_won is not None
+        assert sum(outcome.tricks_won) == TRICKS_PER_HAND
+        assert max(outcome.tricks_won) >= TRICKS_TO_WIN_HAND
+        # Not the fresh [0, 0] the just-dealt next hand would show.
+        assert outcome.tricks_won != (0, 0)
+
+
+def test_match_over_sets_the_match_over_phase() -> None:
+    """The winning hand must land in Phase.MATCH_OVER, not HAND_OVER.
+
+    Every intermediate hand (match not yet decided) correctly moves to
+    HAND_OVER only for the instant before the engine deals the next hand;
+    the *final* hand must leave the state machine in MATCH_OVER, since
+    nothing ever deals another hand after it.
+    """
+    for seed in range(20):
+        eng = play_random_match(seed)
+        assert eng.state.hands.phase is Phase.MATCH_OVER
 
 
 def test_match_reproducible_from_seed() -> None:
@@ -171,8 +226,10 @@ def test_hand_completion_transitions_and_deals() -> None:
     assert final_tally[1 - outcome.hand_winner_team] < TRICKS_TO_WIN_HAND
     if eng.state.winner is None:
         assert eng.state.hands.phase is Phase.TRUMP_CALL
-        for hand in eng.state.hands.hands:
-            assert len(hand) == CARDS_PER_PLAYER
+        new_hakem = eng.state.hands.hakem
+        for seat, hand in enumerate(eng.state.hands.hands):
+            expected = HAKEM_FIRST_BATCH if seat == new_hakem else 0
+            assert len(hand) == expected
         assert eng.state.hand_number == 2
 
 

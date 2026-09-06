@@ -380,10 +380,10 @@ class HokmEnv(gym.Env[Observation, np.integer]):
             self._render_lines.append(f"seat {outcome.seat} plays {_card_name(outcome.card)}")
         if outcome.trick_complete:
             assert outcome.trick_winner is not None
+            assert outcome.tricks_won is not None
             self._render_lines.append(
                 f"--> seat {outcome.trick_winner} wins the trick "
-                f"({self._engine.state.hands.tricks_won[0]}-"
-                f"{self._engine.state.hands.tricks_won[1]})"
+                f"({outcome.tricks_won[0]}-{outcome.tricks_won[1]})"
             )
         if outcome.hand_complete:
             assert outcome.hand_winner_team is not None

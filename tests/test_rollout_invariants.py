@@ -16,7 +16,7 @@ import pytest
 from deephokm.cards import NUM_CARDS, NUM_RANKS
 from deephokm.rules import HokmEngine
 from deephokm.rules.state import (
-    CARDS_PER_PLAYER,
+    HAKEM_FIRST_BATCH,
     POINTS_TO_WIN_MATCH,
     TRICKS_PER_HAND,
     TRICKS_TO_WIN_HAND,
@@ -64,8 +64,10 @@ def _check_hand_completion(
         assert eng.state.game_points[eng.state.winner] == POINTS_TO_WIN_MATCH
         assert min(eng.state.game_points) < POINTS_TO_WIN_MATCH
     else:
-        for hand in eng.state.hands.hands:
-            assert len(hand) == CARDS_PER_PLAYER
+        new_hakem = eng.state.hands.hakem
+        for seat, hand in enumerate(eng.state.hands.hands):
+            expected = HAKEM_FIRST_BATCH if seat == new_hakem else 0
+            assert len(hand) == expected
         assert eng.state.hands.phase is Phase.TRUMP_CALL
     return set()
 
@@ -199,9 +201,16 @@ def test_every_card_appears_in_exactly_one_hand_per_match(seed: int) -> None:
     while eng.state.winner is None:
         if eng.state.hands.phase is Phase.TRUMP_CALL:
             deals_seen += 1
+            # Before trump is declared only the hakem's opening 5 are dealt;
+            # the other 47 sit in pending_deck. The full deck must still
+            # partition exactly, across hands + pending_deck together.
             all_cards = [c for h in eng.state.hands.hands for c in h]
+            all_cards += eng.state.hands.pending_deck
             assert len(all_cards) == NUM_CARDS
             assert len(set(all_cards)) == NUM_CARDS
-            assert all(len(h) == CARDS_PER_PLAYER for h in eng.state.hands.hands)
+            new_hakem = eng.state.hands.hakem
+            for seat, hand in enumerate(eng.state.hands.hands):
+                expected = HAKEM_FIRST_BATCH if seat == new_hakem else 0
+                assert len(hand) == expected
         eng.apply_action(eng.rng.choice(eng.legal_actions()))
     assert deals_seen >= POINTS_TO_WIN_MATCH

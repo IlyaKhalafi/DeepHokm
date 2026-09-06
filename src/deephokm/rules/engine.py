@@ -39,6 +39,12 @@ class ActionOutcome:
         trump: The newly declared trump suit, or ``None``.
         trick_complete: Whether this action completed a trick.
         trick_winner: The seat that won the completed trick, if any.
+        tricks_won: Per-team trick tally *of the hand this trick belonged
+            to*, captured at the moment the trick completed. A completed
+            hand's 13th trick immediately deals the next hand (zeroing the
+            live ``HandState.tricks_won``), so a caller wanting the final
+            tally of the hand that just ended must read it from here, not
+            from the engine's current state.
         hand_complete: Whether this action completed the hand.
         hand_winner_team: Team index that won the completed hand, if any.
         match_complete: Whether this action completed the match.
@@ -51,6 +57,7 @@ class ActionOutcome:
     trump: int | None = None
     trick_complete: bool = False
     trick_winner: int | None = None
+    tricks_won: tuple[int, int] | None = None
     hand_complete: bool = False
     hand_winner_team: int | None = None
     match_complete: bool = False
@@ -149,6 +156,10 @@ class HokmEngine:
         if legality.is_trump_action(action):
             suit = legality.trump_action_to_suit(action)
             hands.trump = suit
+            # The hakem calls trump on the opening 5 alone; the other 47
+            # cards were held back exactly for this moment.
+            dealing.deal_remaining(hands.pending_deck, hands.hakem, hands.hands)
+            hands.pending_deck = []
             hands.phase = Phase.CARD_PLAY
             hands.leader = hands.hakem
             return ActionOutcome(seat=seat, action=action, trump=suit)
@@ -166,6 +177,9 @@ class HokmEngine:
         hands.trick_winners.append(winner)
         hands.current_trick = []
         hands.leader = winner
+        # Snapshot now: a 13th trick redeals the next hand below, zeroing
+        # HandState.tricks_won before a caller can read the final tally.
+        tricks_won_snapshot = (hands.tricks_won[0], hands.tricks_won[1])
 
         trick_complete = True
         hand_complete = False
@@ -181,6 +195,7 @@ class HokmEngine:
             if self.state.winner is not None:
                 match_complete = True
                 match_winner_team = self.state.winner
+                hands.phase = Phase.MATCH_OVER
             else:
                 self.state.hakem = scoring.next_hakem(self.state.hakem, hand_winner_team)
                 self.state.hand_number += 1
@@ -192,6 +207,7 @@ class HokmEngine:
             card=card,
             trick_complete=trick_complete,
             trick_winner=winner,
+            tricks_won=tricks_won_snapshot,
             hand_complete=hand_complete,
             hand_winner_team=hand_winner_team,
             match_complete=match_complete,

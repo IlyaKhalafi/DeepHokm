@@ -18,7 +18,13 @@ from deephokm.env.hokm_env import Observation
 from deephokm.env.spaces import HISTORY_SLOTS
 from deephokm.policies.random_policy import RandomPolicy
 from deephokm.rules.legality import NUM_ACTIONS
-from deephokm.rules.state import NUM_SEATS, TRICKS_PER_HAND, team_of
+from deephokm.rules.state import (
+    CARDS_PER_PLAYER,
+    HAKEM_FIRST_BATCH,
+    NUM_SEATS,
+    TRICKS_PER_HAND,
+    team_of,
+)
 
 
 def random_opponents(seed: int | None = None) -> list[RandomPolicy]:
@@ -318,10 +324,14 @@ def test_every_card_played_once_per_hand_via_obs() -> None:
         action = int(np.flatnonzero(info["action_mask"])[0])
         obs, _, term, trunc, info = env.step(action)
         done = term or trunc
-    # Within a hand the seen count only grows, up to the full 52; a re-deal
-    # drops it back to the new hand (>= 13 cards).
+    # Within a hand the seen count only grows, up to the full 52. A re-deal
+    # resets it: to exactly 5 if the learner is the new hakem (only the
+    # opening 5 are dealt at the trump-call decision point), or to >= 13
+    # otherwise (the learner's first observation of the new hand already
+    # follows the hakem's trump declaration, by which point the full deal —
+    # and possibly some card play — has happened).
     for a, b in zip(seen_counts, seen_counts[1:], strict=False):
-        assert b >= a or b >= 13
+        assert b >= a or b == HAKEM_FIRST_BATCH or b >= CARDS_PER_PLAYER
     assert max(seen_counts) == NUM_CARDS
 
 

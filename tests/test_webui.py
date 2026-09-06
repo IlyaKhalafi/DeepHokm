@@ -11,10 +11,11 @@ from fastapi.testclient import TestClient
 from sb3_contrib import MaskablePPO
 
 import deephokm.webui.app as app_module
+from deephokm.cards import NUM_CARDS
 from deephokm.env import HokmEnv
 from deephokm.nn.policy import HokmMaskablePolicy
 from deephokm.policies.random_policy import RandomPolicy
-from deephokm.rules.state import NUM_SEATS
+from deephokm.rules.state import HAKEM_FIRST_BATCH, NUM_SEATS
 from deephokm.webui.app import app
 from deephokm.webui.serving import ServedPolicy
 from deephokm.webui.state import GameStore
@@ -73,13 +74,24 @@ def test_static_assets_available(client: TestClient) -> None:
 
 
 def test_create_human_game(client: TestClient) -> None:
+    """A fresh game's dealt-card total must match its phase.
+
+    Before trump is declared only the hakem holds cards (5); the response
+    can also already be in CARD_PLAY if an AI hakem's auto-resolved trump
+    call (and possibly a few AI-led plays before the human's turn) already
+    happened inside reset() -- in which case every card is accounted for
+    between hands and the table.
+    """
     response = client.post("/api/games", json={"mode": "human", "seed": 42})
     assert response.status_code == 201
     state = response.json()
     assert state["mode"] == "human"
     assert state["viewer_seat"] == 0
-    assert state["hand_counts"] == [13, 13, 13, 13]
     assert state["phase"] in ("TRUMP_CALL", "CARD_PLAY")
+    if state["phase"] == "TRUMP_CALL":
+        assert sum(state["hand_counts"]) == HAKEM_FIRST_BATCH
+    else:
+        assert sum(state["hand_counts"]) + len(state["table"]) == NUM_CARDS
     assert state["game_points"] == [0, 0]
 
 

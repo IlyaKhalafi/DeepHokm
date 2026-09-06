@@ -55,12 +55,20 @@ def test_first_hakem_uniform() -> None:
 
 
 @pytest.mark.parametrize("hakem", range(NUM_SEATS))
-def test_new_hand_totals(hakem: int) -> None:
+def test_new_hand_deals_only_the_hakem_before_trump_is_called(hakem: int) -> None:
+    """new_hand() must not deal the other 47 cards up front.
+
+    The hakem calls trump on 5 cards alone; dealing everyone's full hand
+    before that call would let the hakem's own choice (and any downstream
+    observation of it) be informed by cards nobody has been dealt yet.
+    """
     deck = dealing.shuffle_deck(random.Random(hakem))
     hand = dealing.new_hand(deck, hakem)
     for seat in range(NUM_SEATS):
-        assert len(hand.hands[seat]) == CARDS_PER_PLAYER
-    all_cards = [c for h in hand.hands for c in h]
+        expected = HAKEM_FIRST_BATCH if seat == hakem else 0
+        assert len(hand.hands[seat]) == expected
+    assert sorted(hand.pending_deck) == sorted(deck[HAKEM_FIRST_BATCH:])
+    all_cards = [c for h in hand.hands for c in h] + hand.pending_deck
     assert sorted(all_cards) == list(range(NUM_CARDS))
 
 
@@ -90,11 +98,22 @@ def test_remaining_quota_sums_to_47() -> None:
 
 
 def test_deal_uses_deck_exactly() -> None:
-    """Every card id in the deck must appear exactly once across the hands."""
+    """Every card id must appear exactly once across the hands and the pending deck."""
     deck = dealing.shuffle_deck(random.Random(11))
     hand = dealing.new_hand(deck, 3)
-    dealt = sorted(c for h in hand.hands for c in h)
-    assert dealt == list(range(NUM_CARDS))
+    dealt = sorted(c for h in hand.hands for c in h) + sorted(hand.pending_deck)
+    assert sorted(dealt) == list(range(NUM_CARDS))
+
+
+def test_deal_remaining_completes_the_hand() -> None:
+    """Calling deal_remaining on the pending deck brings every seat to 13."""
+    deck = dealing.shuffle_deck(random.Random(11))
+    hand = dealing.new_hand(deck, 3)
+    dealing.deal_remaining(hand.pending_deck, hand.hakem, hand.hands)
+    for seat in range(NUM_SEATS):
+        assert len(hand.hands[seat]) == CARDS_PER_PLAYER
+    all_cards = sorted(c for h in hand.hands for c in h)
+    assert all_cards == list(range(NUM_CARDS))
 
 
 def test_deal_rejects_inconsistent_deck() -> None:
