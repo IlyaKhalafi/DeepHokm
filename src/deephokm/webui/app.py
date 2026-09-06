@@ -14,7 +14,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -131,7 +130,16 @@ def submit_action(game_id: str, request: ActionRequest) -> dict[str, Any]:
 
 @app.post("/api/games/{game_id}/step")
 def spectate_step(game_id: str) -> dict[str, Any]:
-    """Advance a spectate game by one decision and return the state."""
+    """Advance a spectate game by exactly one ply and return the state.
+
+    Every seat is AI-controlled in spectate mode, so this drives the engine
+    directly (``engine.apply_action``) for whichever seat is actually due,
+    rather than going through ``HokmEnv.step()``: that call is built around
+    the single-learner-seat Gym API and auto-plays every *other* seat before
+    returning, so one "advance one play" click could silently resolve up to
+    a full trick's worth of plays instead of the single ply the button
+    promises.
+    """
     record = _store.get(game_id)
     if record is None:
         raise HTTPException(status_code=404, detail="unknown game id")
@@ -142,12 +150,11 @@ def spectate_step(game_id: str) -> dict[str, Any]:
     with record.lock:
         if env.engine.state.winner is None:
             seat = env.engine.current_seat()
-            if seat == record.viewer_seat:
-                mask = env.action_masks()
-                obs = env._observation_for(seat)
-                action = env.opponents[seat].act(obs, mask)
-                env.step(np.int64(action))
-                record.moves += 1
+            mask = env._mask_for(seat)
+            obs = env._observation_for(seat)
+            action = env.opponents[seat].act(obs, mask)
+            env.engine.apply_action(action, seat=seat)
+            record.moves += 1
         return public_state(record)
 
 
