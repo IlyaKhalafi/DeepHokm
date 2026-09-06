@@ -74,8 +74,21 @@ class HokmTransformerExtractor(BaseFeaturesExtractor):
             nhead: Attention heads.
             num_layers: Transformer encoder layers.
             dim_feedforward: Width of the feed-forward blocks.
-            features_dim: Output width; defaults to ``d_model``.
+            features_dim: Output width; defaults to ``d_model``. Any other
+                value is rejected: ``_pool`` always returns a ``d_model``-wide
+                vector, so a mismatched ``features_dim`` would make SB3 build
+                policy/value heads sized for an input the forward pass never
+                produces, failing opaquely on the first call instead of here.
+
+        Raises:
+            ValueError: If ``features_dim`` is given and differs from
+                ``d_model``.
         """
+        if features_dim is not None and features_dim != d_model:
+            raise ValueError(
+                f"features_dim ({features_dim}) must equal d_model ({d_model}); "
+                "the pooled output is always d_model wide"
+            )
         super().__init__(observation_space, features_dim or d_model)
         self.d_model = d_model
 

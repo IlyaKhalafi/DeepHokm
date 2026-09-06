@@ -386,3 +386,18 @@ def test_masking_applied_in_forward() -> None:
     with th.no_grad():
         actions, _, _ = policy(batch, action_masks=mask)
     assert ((actions >= 52) & (actions < 56)).all()
+
+
+def test_extractor_rejects_mismatched_features_dim() -> None:
+    """A features_dim that disagrees with d_model must fail loudly at init.
+
+    ``_pool`` always returns a ``d_model``-wide vector; silently accepting a
+    different ``features_dim`` would make SB3 build policy/value heads sized
+    for an input the forward pass never produces, failing opaquely deep
+    inside the first training step instead of here.
+    """
+    with pytest.raises(ValueError, match="features_dim"):
+        HokmTransformerExtractor(observation_space(), d_model=128, features_dim=256)
+    # The matching value and the default (None) must both still work.
+    HokmTransformerExtractor(observation_space(), d_model=128, features_dim=128)
+    HokmTransformerExtractor(observation_space(), d_model=128, features_dim=None)
