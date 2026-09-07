@@ -215,10 +215,15 @@ uv run python scripts/evaluate_search.py --model checkpoints/m8_main/final.zip \
   --opponent greedy --n-seeds 25 --n-samples 4 --top-k 2
 ```
 
-An initial 30-paired-game evaluation at `n_samples=4, top_k=2` found search
-winning 19/30 against the same network's own non-search policy and 17/30
-against the scripted greedy baseline, at roughly 0.2s per searched
-decision — a real but small-sample signal, not yet a large-scale result.
+A first 30-paired-game evaluation at `n_samples=4, top_k=2` looked
+promising (19/30 vs. the plain policy, 17/30 vs. greedy), but a larger
+follow-up (70 and 72 paired games respectively, combining both batches)
+did not hold up: 37/70 (0.53) vs. plain — essentially a coin flip — and
+32/72 (0.44) vs. greedy — behind the plain policy. At this setting, search
+does not reliably improve on the trained network and plausibly hurts
+slightly against a disciplined opponent; see `REVIEW_LOG.local.md` for two
+untested hypotheses why. Treat this as an unproven experiment, not a
+shipped improvement.
 
 ## Web UI
 
