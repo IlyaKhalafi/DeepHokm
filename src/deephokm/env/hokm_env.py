@@ -19,17 +19,18 @@ from typing import TYPE_CHECKING, Any
 import gymnasium as gym
 import numpy as np
 
-from deephokm.cards import NUM_CARDS, NUM_SUITS, Suit
+from deephokm.cards import Suit
 from deephokm.cards import card_name as _card_name
 from deephokm.env.masked_space import MaskedDiscrete
 from deephokm.env.spaces import (
-    HISTORY_SLOTS,
     Observation,
+    mask_for,
+    observation_for,
     observation_space,
 )
 from deephokm.rules import HokmEngine
 from deephokm.rules.legality import NUM_ACTIONS, is_trump_action, trump_action_to_suit
-from deephokm.rules.state import NUM_SEATS, Phase, team_of
+from deephokm.rules.state import NUM_SEATS, team_of
 
 if TYPE_CHECKING:  # pragma: no cover
     from deephokm.policies.base import HokmPolicy
@@ -291,11 +292,8 @@ class HokmEnv(gym.Env[Observation, np.integer]):
 
     def _refresh_mask(self) -> None:
         """Recompute the learner's action mask from the live state."""
-        mask = np.zeros(NUM_ACTIONS, dtype=np.int8)
-        if self._engine.state.winner is None:
-            legal = self._engine.legal_actions(self.seat)
-            mask[legal] = 1
-        self._action_mask = mask
+        legal = self._engine.legal_actions(self.seat) if self._engine.state.winner is None else []
+        self._action_mask = mask_for(legal)
 
     def _sample_legal_actions(self) -> list[int]:
         """Legal action ids for the action space's masked sampler."""
@@ -305,9 +303,7 @@ class HokmEnv(gym.Env[Observation, np.integer]):
 
     def _mask_for(self, seat: int) -> np.ndarray:
         """Return the action mask for an arbitrary seat."""
-        mask = np.zeros(NUM_ACTIONS, dtype=np.int8)
-        mask[self._engine.legal_actions(seat)] = 1
-        return mask
+        return mask_for(self._engine.legal_actions(seat))
 
     def _info(self) -> dict[str, Any]:
         """Build the info dict returned with every observation."""
@@ -322,65 +318,7 @@ class HokmEnv(gym.Env[Observation, np.integer]):
 
     def _observation_for(self, seat: int) -> Observation:
         """Build the observation for ``seat`` from public state + own hand."""
-        hands = self._engine.state.hands
-        own_team = team_of(seat)
-
-        hand = np.zeros(NUM_CARDS, dtype=np.int8)
-        hand[hands.hands[seat]] = 1
-
-        seen = hand.copy()
-        seen[hands.played] = 1
-
-        trick = np.zeros(NUM_CARDS, dtype=np.int8)
-        trick_play = np.full(NUM_SEATS, -1, dtype=np.int64)
-        for played_seat, card in hands.current_trick:
-            trick[card] = 1
-            trick_play[played_seat] = card
-
-        # Completed tricks only: the current trick has its own slot. Reverse
-        # play order puts the most recent card first, so a fixed slot always
-        # means the same recency regardless of how far the hand has run.
-        completed = len(hands.played) - len(hands.current_trick)
-        history = np.full(HISTORY_SLOTS, -1, dtype=np.int64)
-        recent = hands.played[:completed][::-1][:HISTORY_SLOTS]
-        history[: len(recent)] = recent
-
-        trump = np.zeros(NUM_SUITS, dtype=np.int8)
-        if hands.trump is not None:
-            trump[hands.trump] = 1
-
-        phase = np.zeros(2, dtype=np.int8)
-        if hands.phase is Phase.TRUMP_CALL:
-            phase[0] = 1
-        elif hands.phase is Phase.CARD_PLAY:
-            phase[1] = 1
-
-        tricks_won = np.array(
-            [hands.tricks_won[own_team], hands.tricks_won[1 - own_team]], dtype=np.int64
-        )
-        game_points = np.array(
-            [
-                self._engine.state.game_points[own_team],
-                self._engine.state.game_points[1 - own_team],
-            ],
-            dtype=np.int64,
-        )
-
-        seat_onehot = np.zeros(NUM_SEATS, dtype=np.int8)
-        seat_onehot[seat] = 1
-
-        return Observation(
-            hand=hand,
-            seen=seen,
-            trick=trick,
-            trick_play=trick_play,
-            history=history,
-            trump=trump,
-            phase=phase,
-            tricks_won=tricks_won,
-            game_points=game_points,
-            seat=seat_onehot,
-        )
+        return observation_for(self._engine.state.hands, seat, self._engine.state.game_points)
 
     # ---------------------------------------------------------- rendering
 

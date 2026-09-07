@@ -30,9 +30,10 @@ from sb3_contrib import MaskablePPO
 from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
 
 from deephokm.env.hokm_env import HokmEnv
-from deephokm.env.spaces import Observation
+from deephokm.env.spaces import Observation, mask_for, observation_for
 from deephokm.nn.policy import HokmMaskablePolicy
 from deephokm.policies.greedy_policy import GreedyPolicy
+from deephokm.rules.engine import HokmEngine
 from deephokm.rules.state import NUM_SEATS
 
 DEFAULT_N_MATCHES = 3000
@@ -68,7 +69,7 @@ def collect_dataset(n_matches: int, seed: int) -> BCDataset:
     Every seat is played by its own :class:`GreedyPolicy` instance, so the
     recorded action at each ply is exactly what a disciplined, non-learning
     player would do in that state. The rules engine is driven directly
-    (``env.engine.start_match`` / ``apply_action``), not through
+    (``HokmEngine.start_match`` / ``apply_action``), not through
     ``HokmEnv.reset()``/``step()``: those are built around a single learner
     seat and would auto-advance -- and silently drop from the dataset --
     every ply before that seat's first turn.
@@ -80,7 +81,7 @@ def collect_dataset(n_matches: int, seed: int) -> BCDataset:
     Returns:
         The flat dataset across every match.
     """
-    env = HokmEnv(seat=0, opponents=[GreedyPolicy() for _ in range(NUM_SEATS)])
+    engine = HokmEngine()
     greedy_by_seat = [GreedyPolicy() for _ in range(NUM_SEATS)]
     observations: list[Observation] = []
     masks: list[np.ndarray] = []
@@ -89,19 +90,19 @@ def collect_dataset(n_matches: int, seed: int) -> BCDataset:
 
     for match_idx in range(n_matches):
         match_seed = seed + match_idx
-        env.engine.start_match(seed=match_seed)
+        engine.start_match(seed=match_seed)
         for seat, greedy in enumerate(greedy_by_seat):
             greedy.reset(match_seed * NUM_SEATS + seat)
-        while env.engine.state.winner is None:
-            seat = env.engine.current_seat()
-            obs = env._observation_for(seat)  # noqa: SLF001
-            mask = env._mask_for(seat)  # noqa: SLF001
+        while engine.state.winner is None:
+            seat = engine.current_seat()
+            obs = observation_for(engine.state.hands, seat, engine.state.game_points)
+            mask = mask_for(engine.legal_actions(seat))
             action = greedy_by_seat[seat].act(obs, mask)
             observations.append(obs)
             masks.append(mask)
             actions.append(action)
             match_ids.append(match_idx)
-            env.engine.apply_action(action, seat=seat)
+            engine.apply_action(action, seat=seat)
 
     return BCDataset(
         observations=observations,
