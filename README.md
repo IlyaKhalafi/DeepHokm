@@ -198,6 +198,28 @@ epochs plus a hard trust-region cap — see `train.py:hyperparameters` and
 schedule like `learning_rate`, so annealing it would need a training-loop
 patch rather than a constructor argument.
 
+## Search
+
+`src/deephokm/policies/search.py` adds an optional test-time search step on
+top of a trained policy for card-play decisions: root-sampled
+imperfect-information Monte Carlo (IIMC), the imperfect-information
+analogue of the search a chess engine runs against a learned evaluator.
+Since opponents' hands are hidden, it samples plausible full deals
+consistent with public play (respecting suit voids), then evaluates the
+policy's own top candidate actions by rolling each forward with the same
+network before picking the best-scoring one. See the module docstring for
+the full design and its information-fairness invariant.
+
+```bash
+uv run python scripts/evaluate_search.py --model checkpoints/m8_main/final.zip \
+  --opponent greedy --n-seeds 25 --n-samples 4 --top-k 2
+```
+
+An initial 30-paired-game evaluation at `n_samples=4, top_k=2` found search
+winning 19/30 against the same network's own non-search policy and 17/30
+against the scripted greedy baseline, at roughly 0.2s per searched
+decision — a real but small-sample signal, not yet a large-scale result.
+
 ## Web UI
 
 ```bash
