@@ -38,8 +38,8 @@ from deephokm.policies.random_policy import RandomPolicy
 
 P_LATEST = 0.00
 P_POOL = 0.00
-P_GREEDY = 1.00
-P_RANDOM = 0.00
+P_GREEDY = 0.50
+P_RANDOM = 0.50
 
 SNAPSHOT_GLOB = "snapshot_*.zip"
 
