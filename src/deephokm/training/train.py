@@ -130,8 +130,8 @@ def hyperparameters(n_steps: int = DEFAULT_N_STEPS, gamma: float = DEFAULT_GAMMA
     return {
         "learning_rate": LinearSchedule(3e-4, 3e-5, 1.0),
         "n_steps": n_steps,
-        "batch_size": 1024,
-        "n_epochs": 4,
+        "batch_size": 2048,
+        "n_epochs": 2,
         "gamma": gamma,
         "gae_lambda": 0.95,
         "clip_range": 0.2,
