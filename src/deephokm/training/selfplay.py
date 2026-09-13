@@ -36,10 +36,10 @@ from deephokm.policies.base import HokmPolicy
 from deephokm.policies.greedy_policy import GreedyPolicy
 from deephokm.policies.random_policy import RandomPolicy
 
-P_LATEST = 0.00
-P_POOL = 0.00
+P_LATEST = 0.30
+P_POOL = 0.20
 P_GREEDY = 0.50
-P_RANDOM = 0.50
+P_RANDOM = 0.00
 
 SNAPSHOT_GLOB = "snapshot_*.zip"
 
