@@ -67,7 +67,7 @@ DEFAULT_N_STEPS = 256
 # only pays out at the point a hand's outcome is actually decided — so it
 # replaces trick-level shaping as the default and trick_reward defaults to 0.
 DEFAULT_TRICK_REWARD = 0.0
-DEFAULT_HAND_REWARD = 0.15
+DEFAULT_HAND_REWARD = 0.30
 DEFAULT_GAMMA = 0.997
 
 
@@ -128,14 +128,14 @@ def hyperparameters(n_steps: int = DEFAULT_N_STEPS, gamma: float = DEFAULT_GAMMA
         gamma: Discount factor.
     """
     return {
-        "learning_rate": LinearSchedule(3e-4, 3e-5, 1.0),
+        "learning_rate": LinearSchedule(1e-3, 1e-5, 1.0),
         "n_steps": 256,
-        "batch_size": 4096,
-        "n_epochs": 1,
+        "batch_size": 8192,
+        "n_epochs": 3,
         "gamma": gamma,
         "gae_lambda": 0.95,
         "clip_range": 0.2,
-        "ent_coef": 0.01,
+        "ent_coef": 0.005,
         "vf_coef": 0.5,
         "max_grad_norm": 0.5,
         "target_kl": 0.02,

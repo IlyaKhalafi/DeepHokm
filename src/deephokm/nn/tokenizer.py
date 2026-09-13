@@ -45,6 +45,16 @@ TYPE_HISTORY = 2
 TYPE_CONTEXT = 3
 NUM_TYPES = 4
 
+# Relative-seat role of a card token: 0 self, 1 the next seat clockwise, 2
+# partner, 3 the previous seat clockwise; ROLE_NA for tokens with no owning
+# seat (the context slots). Hand tokens are always role 0 (they are always
+# the acting seat's own cards); trick/history tokens carry the relative role
+# of whoever actually played that card, letting the network condition on
+# partner-vs-opponent play directly instead of inferring it from card-id
+# patterns alone.
+ROLE_NA = NUM_SEATS
+ROLE_VOCAB = NUM_SEATS + 1
+
 # Context token slots, in fixed order.
 CTX_TRUMP = 0
 CTX_PHASE = 1
@@ -77,6 +87,10 @@ class TokenizedObservation:
         type_ids: ``(batch, MAX_TOKENS)`` int64 token-type ids.
         positions: ``(batch, MAX_TOKENS)`` int64 slot positions within a type
             (always 0 for hand tokens: the hand is a set).
+        roles: ``(batch, MAX_TOKENS)`` int64 relative-seat role per token (see
+            :data:`ROLE_NA`): 0 for hand tokens (always the acting seat's own
+            cards), the played seat's relative role for trick/history
+            tokens, ``ROLE_NA`` for context tokens and unused padding.
         context_values: ``(batch, NUM_CONTEXT_TOKENS)`` int64 non-negative
             indices into each context slot's value range.
         padding_mask: ``(batch, MAX_TOKENS)`` bool; True where the token is
@@ -87,6 +101,7 @@ class TokenizedObservation:
     is_card: th.Tensor
     type_ids: th.Tensor
     positions: th.Tensor
+    roles: th.Tensor
     context_values: th.Tensor
     padding_mask: th.Tensor
 
@@ -97,15 +112,19 @@ def _hand_ids(observation: Observation) -> list[int]:
     return ids
 
 
-def _trick_play_order(observation: Observation) -> list[int]:
-    """Return the current trick's cards in play order.
+def _trick_play_order(observation: Observation) -> list[tuple[int, int]]:
+    """Return the current trick's ``(card, role)`` pairs in play order.
 
     ``trick_play`` is indexed by seat; play order rotates clockwise from the
     leader. The leader is the played seat whose counterclockwise neighbor
     (``seat - 1``) has not played: the played set is a clockwise run starting
-    at the leader, so only the leader's predecessor is unplayed.
+    at the leader, so only the leader's predecessor is unplayed. ``role`` is
+    the played seat relative to the acting seat (see :data:`ROLE_NA`'s
+    docstring for the convention).
     """
     trick_play = np.asarray(observation["trick_play"])
+    seat_onehot = np.asarray(observation["seat"])
+    acting_seat = int(np.argmax(seat_onehot)) if seat_onehot.sum() else 0
     played_mask = trick_play >= 0
     if not played_mask.any():
         return []
@@ -115,12 +134,12 @@ def _trick_play_order(observation: Observation) -> list[int]:
             leader = seat
             break
     assert leader >= 0, "no leader found among played seats"
-    ordered: list[int] = []
+    ordered: list[tuple[int, int]] = []
     for offset in range(NUM_SEATS):
         seat = (leader + offset) % NUM_SEATS
         card = int(trick_play[seat])
         if card >= 0:
-            ordered.append(card)
+            ordered.append((card, (seat - acting_seat) % NUM_SEATS))
     return ordered
 
 
@@ -156,35 +175,42 @@ def tokenize(observation: Observation) -> TokenizedObservation:
     hand = sorted(_hand_ids(observation))[:NUM_HAND_SLOTS]
     trick = _trick_play_order(observation)[:NUM_TRICK_SLOTS]
     # History arrives already ordered (most recent completed-trick play
-    # first) and -1 padded.
+    # first) and -1 padded; history_role is padded in lockstep.
     raw_history = np.asarray(observation["history"])
-    history = [int(c) for c in raw_history[raw_history >= 0][:NUM_HISTORY_SLOTS]]
+    raw_history_role = np.asarray(observation["history_role"])
+    history_valid = raw_history >= 0
+    history = [int(c) for c in raw_history[history_valid][:NUM_HISTORY_SLOTS]]
+    history_roles = [int(r) for r in raw_history_role[history_valid][:NUM_HISTORY_SLOTS]]
     context = _context_values(observation)
 
     tokens = [PAD_TOKEN] * MAX_TOKENS
     is_card = [False] * MAX_TOKENS
     type_ids = [TYPE_CONTEXT] * MAX_TOKENS
     positions = [0] * MAX_TOKENS
+    roles = [ROLE_NA] * MAX_TOKENS
     padding = [False] * MAX_TOKENS
 
     for i, card in enumerate(hand):
         tokens[i] = card
         is_card[i] = True
         type_ids[i] = TYPE_HAND
+        roles[i] = 0  # hand cards are always the acting seat's own
         padding[i] = True
-    for i, card in enumerate(trick):
+    for i, (card, role) in enumerate(trick):
         col = NUM_HAND_SLOTS + i
         tokens[col] = card
         is_card[col] = True
         type_ids[col] = TYPE_TRICK
         positions[col] = i
+        roles[col] = role
         padding[col] = True
-    for i, card in enumerate(history):
+    for i, (card, role) in enumerate(zip(history, history_roles, strict=True)):
         col = NUM_HAND_SLOTS + NUM_TRICK_SLOTS + i
         tokens[col] = card
         is_card[col] = True
         type_ids[col] = TYPE_HISTORY
         positions[col] = i
+        roles[col] = role
         padding[col] = True
     for slot, column in enumerate(CTX_COLUMNS):
         tokens[column] = context[slot]
@@ -197,6 +223,7 @@ def tokenize(observation: Observation) -> TokenizedObservation:
         is_card=th.tensor([is_card], dtype=th.bool),
         type_ids=th.tensor([type_ids], dtype=th.int64),
         positions=th.tensor([positions], dtype=th.int64),
+        roles=th.tensor([roles], dtype=th.int64),
         context_values=th.tensor([context], dtype=th.int64),
         padding_mask=th.tensor([padding], dtype=th.bool),
     )
@@ -251,13 +278,18 @@ def _binary_to_ids(mask: th.Tensor, limit: int | None) -> tuple[th.Tensor, th.Te
 
 
 def _batch_card_groups(
-    hand: th.Tensor, trick_play: th.Tensor, history: th.Tensor
-) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
-    """Compute per-row hand/trick/history card id tensors.
+    hand: th.Tensor,
+    trick_play: th.Tensor,
+    history: th.Tensor,
+    history_role: th.Tensor,
+    seat: th.Tensor,
+) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+    """Compute per-row hand/trick/history card id (and role) tensors.
 
     Returns:
-        ``(hand_ids, n_hand, trick_ids, n_trick, history_ids)`` where all id
-        tensors are left-packed with PAD_TOKEN in unused slots.
+        ``(hand_ids, n_hand, trick_ids, trick_roles, n_trick, history_ids,
+        history_roles)`` where all id/role tensors are left-packed with
+        ``PAD_TOKEN``/``ROLE_NA`` respectively in unused slots.
     """
     device = hand.device
     # Hand: binary vector; the card id is the column index of each set bit.
@@ -275,11 +307,20 @@ def _batch_card_groups(
     seq = th.gather(trick_play, 1, seats)  # play order; -1 where absent
     seq_valid = seq >= 0
     trick_ids, n_trick = _compact_left(th.where(seq_valid, seq, PAD_TOKEN), seq_valid)
+    # _compact_left's packing permutation is a deterministic function of
+    # `valid` alone (stable-sorts on ~valid, never on the ids' own values),
+    # so packing the role tensor with the identical `seq_valid` mask lands
+    # each role in the same column as its card in trick_ids.
+    acting_seat = seat.argmax(dim=1)
+    trick_role_raw = (seats - acting_seat.view(-1, 1)) % NUM_SEATS
+    trick_roles, _ = _compact_left(trick_role_raw, seq_valid)
 
     # History arrives already ordered (most recent completed-trick play
     # first) with -1 padding; only the padding value has to be remapped.
-    history_ids = th.where(history >= 0, history, PAD_TOKEN)[:, :NUM_HISTORY_SLOTS]
-    return hand_ids, n_hand, trick_ids, n_trick, history_ids
+    hist_valid = history >= 0
+    history_ids = th.where(hist_valid, history, PAD_TOKEN)[:, :NUM_HISTORY_SLOTS]
+    history_roles = th.where(hist_valid, history_role, ROLE_NA)[:, :NUM_HISTORY_SLOTS]
+    return hand_ids, n_hand, trick_ids, trick_roles, n_trick, history_ids, history_roles
 
 
 def _batch_context(
@@ -321,35 +362,39 @@ def tokenize_tensor_batch(observations: dict[str, th.Tensor]) -> TokenizedObserv
     hand = observations["hand"].to(th.int64)
     trick_play = observations["trick_play"].to(th.int64)
     history = observations["history"].to(th.int64)
+    history_role = observations["history_role"].to(th.int64)
     trump = observations["trump"].to(th.int64)
     phase = observations["phase"].to(th.int64)
     tricks_won = observations["tricks_won"].to(th.int64)
     game_points = observations["game_points"].to(th.int64)
+    seat = observations["seat"].to(th.int64)
 
     n = hand.shape[0]
     device = hand.device
-    hand_ids, n_hand, trick_ids, n_trick, history_ids = _batch_card_groups(
-        hand, trick_play, history
+    hand_ids, n_hand, trick_ids, trick_roles, n_trick, history_ids, history_roles = (
+        _batch_card_groups(hand, trick_play, history, history_role, seat)
     )
-    seat = observations["seat"].to(th.int64)
     context_values = _batch_context(trump, phase, tricks_won, game_points, seat)
 
     tokens = th.full((n, MAX_TOKENS), PAD_TOKEN, dtype=th.int64, device=device)
     is_card = th.zeros((n, MAX_TOKENS), dtype=th.bool, device=device)
     type_ids = th.full((n, MAX_TOKENS), TYPE_CONTEXT, dtype=th.int64, device=device)
     positions = th.zeros((n, MAX_TOKENS), dtype=th.int64, device=device)
+    roles = th.full((n, MAX_TOKENS), ROLE_NA, dtype=th.int64, device=device)
     padding = th.zeros((n, MAX_TOKENS), dtype=th.bool, device=device)
 
     tokens[:, HAND_SLICE] = hand_ids
     hand_valid = th.arange(NUM_HAND_SLOTS, device=device).unsqueeze(0) < n_hand.unsqueeze(1)
     is_card[:, HAND_SLICE] = hand_valid
     type_ids[:, HAND_SLICE] = th.where(hand_valid, TYPE_HAND, TYPE_CONTEXT)
+    roles[:, HAND_SLICE] = th.where(hand_valid, 0, ROLE_NA)
 
     tokens[:, TRICK_SLICE] = trick_ids[:, :NUM_TRICK_SLOTS]
     trick_valid = th.arange(NUM_TRICK_SLOTS, device=device).unsqueeze(0) < n_trick.unsqueeze(1)
     is_card[:, TRICK_SLICE] = trick_valid
     type_ids[:, TRICK_SLICE] = th.where(trick_valid, TYPE_TRICK, TYPE_CONTEXT)
     positions[:, TRICK_SLICE] = th.where(trick_valid, th.arange(NUM_TRICK_SLOTS, device=device), 0)
+    roles[:, TRICK_SLICE] = th.where(trick_valid, trick_roles[:, :NUM_TRICK_SLOTS], ROLE_NA)
 
     hist_valid = history_ids != PAD_TOKEN
     tokens[:, HISTORY_SLICE] = history_ids
@@ -358,6 +403,7 @@ def tokenize_tensor_batch(observations: dict[str, th.Tensor]) -> TokenizedObserv
     positions[:, HISTORY_SLICE] = th.where(
         hist_valid, th.arange(NUM_HISTORY_SLOTS, device=device), 0
     )
+    roles[:, HISTORY_SLICE] = th.where(hist_valid, history_roles, ROLE_NA)
 
     for slot, column in enumerate(CTX_COLUMNS):
         tokens[:, column] = context_values[:, slot]
@@ -374,6 +420,7 @@ def tokenize_tensor_batch(observations: dict[str, th.Tensor]) -> TokenizedObserv
         is_card=is_card,
         type_ids=type_ids,
         positions=positions,
+        roles=roles,
         context_values=context_values,
         padding_mask=padding,
     )

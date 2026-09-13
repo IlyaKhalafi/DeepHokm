@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -87,6 +88,40 @@ def _pin_thread_if_unset() -> None:
         torch.set_num_threads(1)
 
 
+def _load_model_preserving_global_rng(model_path: str) -> MaskablePPO:
+    """Load a checkpoint without perturbing the caller's global RNG state.
+
+    ``MaskablePPO.load`` reconstructs the model via the algorithm's own
+    ``__init__``, which calls ``set_random_seed(self.seed)`` during
+    ``_setup_model`` -- and every checkpoint this project trains carries an
+    explicit ``seed`` (``train.py`` always passes ``--seed``), so loading one
+    deterministically resets python's, numpy's and torch's *global* RNGs to a
+    fixed state tied to that seed, not just the loaded model's own state.
+    Confirmed directly: ``torch.manual_seed(111); MaskablePPO.load(path);
+    torch.rand(4)`` equals the same sequence started from
+    ``torch.manual_seed(222)`` whenever the checkpoint has a seed. Harmless
+    in a spawned subprocess (nothing else depends on its RNG afterwards), but
+    ``run_gauntlet_shards``/``run_team_gauntlet_shards`` call the ``_shard``
+    functions directly, in-process, whenever a round collapses to a single
+    shard -- and that process may be the training loop itself, which would
+    silently collapse its own rollout action sampling onto a fixed, repeating
+    stream after every such round. This is the same failure mode the
+    now-removed explicit ``model.set_random_seed(0)`` call caused (see
+    ``test_single_shard_gauntlet_does_not_reseed_the_global_rng``), just
+    reached through the SB3 API's own ``load()`` instead of an extra call
+    this code used to make.
+    """
+    python_state = random.getstate()
+    numpy_state = np.random.get_state()
+    torch_state = torch.random.get_rng_state()
+    try:
+        return MaskablePPO.load(model_path, device="cpu")
+    finally:
+        random.setstate(python_state)
+        np.random.set_state(numpy_state)
+        torch.random.set_rng_state(torch_state)
+
+
 def _play_shard(
     model_path: str,
     spec: OpponentSpec,
@@ -105,13 +140,14 @@ def _play_shard(
     A single-shard round runs this function directly in the caller's own
     process rather than a spawned subprocess (see ``run_gauntlet_shards``),
     so nothing here may touch process-global state the caller depends on:
-    every prediction is deterministic (argmax, no sampling), so the model's
-    own RNG is never seeded here, and the thread count is only pinned when
-    unset.
+    every prediction is deterministic (argmax, no sampling) so the model's
+    own RNG is never seeded here, loading is wrapped to leave the caller's
+    global RNG untouched (see :func:`_load_model_preserving_global_rng`), and
+    the thread count is only pinned when unset.
     """
     _pin_thread_if_unset()
 
-    model = MaskablePPO.load(model_path, device="cpu")
+    model = _load_model_preserving_global_rng(model_path)
 
     opponents = spec.build()
     env = HokmEnv(seat=0, opponents=opponents)
@@ -146,6 +182,105 @@ def _shard_indices(n_games: int, n_workers: int) -> list[list[int]]:
         return [indices]
     size = (n_games + n_workers - 1) // n_workers
     return [indices[i : i + size] for i in range(0, n_games, size)]
+
+
+def _team_env_for(spec: OpponentSpec, controlled_team: int) -> HokmEnv:
+    """Build a team-controlled env with ``spec`` filling the other team."""
+    opponents = spec.build()
+    controlled_placeholder = opponents[0]  # never consulted; controlled seats are skipped
+    team_opponents = list(opponents)
+    for seat in (controlled_team, controlled_team + 2):
+        team_opponents[seat] = controlled_placeholder
+    return HokmEnv(seat=controlled_team, opponents=team_opponents, control_partner=True)
+
+
+def _play_team_shard(
+    model_path: str,
+    spec: OpponentSpec,
+    game_indices: list[int],
+    round_seed: int,
+    controlled_team: int | None = None,
+) -> int:
+    """Play ``game_indices`` with the model controlling BOTH seats of one team.
+
+    Unlike :func:`_play_shard` (one learner seat, the opponent policy fills
+    every other seat including the learner's own partner), this is the
+    honest reading of "our team versus their team": both of the controlled
+    team's seats act through the same model, both of the other team's seats
+    run ``spec``. The network sees an absolute one-hot seat token, so nothing
+    guarantees it plays identically on both team labels: when
+    ``controlled_team`` is ``None`` (the default), each game index alternates
+    between controlling team 0 (even index) and team 1 (odd index), so a
+    round always covers both labels instead of risking a blind spot on the
+    one never evaluated; passing 0 or 1 pins a single label (used by tests
+    that need one deterministic matchup). See :func:`run_team_gauntlet_shards`
+    for why this is a separate function rather than a flag on ``_play_shard``
+    -- it shares that function's single-shard in-process / spawned-subprocess
+    split and RNG/thread-count care, so it is kept structurally parallel
+    rather than branchy.
+    """
+    _pin_thread_if_unset()
+    model = _load_model_preserving_global_rng(model_path)
+    envs = {
+        team: _team_env_for(spec, team)
+        for team in ({0, 1} if controlled_team is None else {controlled_team})
+    }
+    wins = 0
+    for index in game_indices:
+        team = index % 2 if controlled_team is None else controlled_team
+        wins += int(_play_game(model, envs[team], match_seed(round_seed, index)))
+    for env in envs.values():
+        env.close()
+    return wins
+
+
+def run_team_gauntlet_shards(
+    model_path: str,
+    spec: OpponentSpec,
+    *,
+    n_games: int,
+    n_workers: int,
+    seed: int,
+    controlled_team: int | None = None,
+) -> int:
+    """Team-vs-team counterpart of :func:`run_gauntlet_shards`.
+
+    The model controls both seats of one team; ``spec`` fills both seats of
+    the other. No engine asymmetry favours either team label (the first
+    hakem is drawn uniformly per match), so a single team label would be an
+    unbiased estimate of "our team's win rate against a team of X" *if* the
+    policy played identically on both labels -- but it sees an absolute
+    one-hot seat token, so nothing guarantees that. ``controlled_team=None``
+    (the default) alternates team 0 and team 1 by game index within each
+    shard, so the round always covers both; passing 0 or 1 pins one label
+    (used by tests that need a single deterministic matchup).
+
+    Args:
+        model_path: Saved evaluation model (the current policy).
+        spec: The opponent configuration for the opposing team's two seats.
+        n_games: Total games in the round.
+        n_workers: Worker processes to split the games across.
+        seed: Round index; offsets the game seeds so rounds are independent.
+        controlled_team: Fix the controlled team to 0 or 1, or alternate by
+            game index when ``None``.
+
+    Returns:
+        The number of games the model's team won.
+    """
+    shards = [shard for shard in _shard_indices(n_games, max(1, n_workers)) if shard]
+    if not shards:
+        return 0
+    if len(shards) == 1:
+        return _play_team_shard(
+            model_path, spec, shards[0], round_seed=seed, controlled_team=controlled_team
+        )
+    ctx = multiprocessing.get_context("spawn")
+    with ctx.Pool(processes=len(shards)) as pool:
+        results = pool.starmap(
+            _play_team_shard,
+            [(model_path, spec, shard, seed, controlled_team) for shard in shards],
+        )
+    return sum(results)
 
 
 def run_gauntlet_shards(

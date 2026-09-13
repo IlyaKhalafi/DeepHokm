@@ -25,12 +25,22 @@ from deephokm.training.callbacks import (
     GauntletCallback,
     RollingCheckpointCallback,
     SelfPlayCallback,
+    TeamGauntletCallback,
 )
-from deephokm.training.env_factory import make_env, make_vec_env
+from deephokm.training.env_factory import (
+    make_env,
+    make_team_vs_greedy_env,
+    make_team_vs_greedy_vec_env,
+    make_vec_env,
+)
+from deephokm.training.finetune_vs_greedy import main as finetune_main
 from deephokm.training.gauntlet_workers import (
     OpponentSpec,
+    _play_team_shard,
+    _team_env_for,
     match_seed,
     run_gauntlet_shards,
+    run_team_gauntlet_shards,
 )
 from deephokm.training.selfplay import (
     PoolOpponentProvider,
@@ -642,3 +652,288 @@ def test_resume_continues_from_a_saved_run(tmp_path: Path) -> None:
         ]
     )
     assert (resumed_dir / "final.zip").is_file()
+
+
+def test_make_team_vs_greedy_env_rotates_controlled_team_by_rank() -> None:
+    """``rank % 2`` must pick which team the model controls."""
+    even = make_team_vs_greedy_env(rank=0, seed=0)
+    odd = make_team_vs_greedy_env(rank=1, seed=0)
+    assert even.seat == 0
+    assert even.control_partner is True
+    assert odd.seat == 1
+    even.close()
+    odd.close()
+
+
+def test_make_team_vs_greedy_env_hand_only_flag_reaches_the_env() -> None:
+    """The CLI's curriculum flag must actually toggle ``HokmEnv.hand_only``."""
+    plain = make_team_vs_greedy_env(rank=0, seed=0, hand_only=False)
+    curriculum = make_team_vs_greedy_env(rank=0, seed=0, hand_only=True)
+    assert plain.hand_only is False
+    assert curriculum.hand_only is True
+    plain.close()
+    curriculum.close()
+
+
+def test_make_team_vs_greedy_env_never_dispatches_to_the_opponent_list() -> None:
+    """The controlled team's placeholder opponents must never be consulted.
+
+    Regression guard: the controlled seats' entries in ``opponents`` are
+    real ``GreedyPolicy`` instances (never invoked) rather than ``None``, so
+    this also proves ``control_partner`` truly skips them -- calling one
+    would just play more (still legal) greedy moves rather than crashing,
+    silently masking the bug. Assert instead that both team seats appear as
+    the acting seat across the episode, which only happens if the env keeps
+    stepping the learner through both of them.
+    """
+    env = make_team_vs_greedy_env(rank=0, seed=3)
+    obs, info = env.reset(seed=3)
+    seen_seats: set[int] = set()
+    rng = random.Random(3)
+    done = False
+    while not done:
+        seen_seats.add(int(np.argmax(obs["seat"])))
+        legal = np.flatnonzero(info["action_mask"])
+        action = int(rng.choice(legal))
+        obs, _r, term, trunc, info = env.step(action)
+        done = term or trunc
+    assert seen_seats == {0, 2}
+    env.close()
+
+
+def test_make_team_vs_greedy_vec_env_shapes_and_masks() -> None:
+    vec = make_team_vs_greedy_vec_env(n_envs=2, seed=0)
+    obs = vec.reset()
+    assert obs["hand"].shape[0] == 2
+    masks = vec.env_method("action_masks")
+    assert all(mask.shape == (56,) for mask in masks)
+    # Shape checks alone would also pass for the ordinary single-seat,
+    # random-opponent factory; confirm each worker is actually wired for the
+    # team-vs-Greedy matchup this fine-tune depends on.
+    assert vec.get_attr("control_partner") == [True, True]
+    seats = vec.get_attr("seat")
+    assert sorted(seats) == [0, 1], "rank % 2 must rotate the controlled team"
+    for opponents in vec.get_attr("opponents"):
+        assert sum(isinstance(policy, GreedyPolicy) for policy in opponents) >= 2
+    vec.close()
+
+
+def test_run_team_gauntlet_shards_worker_invariant_and_bounded() -> None:
+    """The team gauntlet must be worker-count invariant, like the solo one."""
+    env = make_env(rank=0, seed=0)
+    model = tiny_model(env)
+    model.learn(total_timesteps=128)
+    spec = OpponentSpec(kind="greedy")
+    with tempfile.TemporaryDirectory() as tmp:
+        model_path = f"{tmp}/m.zip"
+        model.save(model_path)
+        w1 = run_team_gauntlet_shards(model_path, spec, n_games=12, n_workers=3, seed=1)
+        w2 = run_team_gauntlet_shards(model_path, spec, n_games=12, n_workers=3, seed=1)
+        w_serial = run_team_gauntlet_shards(model_path, spec, n_games=12, n_workers=1, seed=1)
+    assert w1 == w2, "same-seed team gauntlet rounds must match"
+    assert w1 == w_serial, "worker count must not change results"
+    assert 0 <= w1 <= 12
+    env.close()
+
+
+def test_team_env_for_controls_the_right_seats_for_each_team_label() -> None:
+    """Whitebox check on the env ``_play_team_shard`` actually plays with.
+
+    A purely statistical "team score differs from solo score" test is weak
+    (it would also pass, noisily, under several wrong wirings); check the
+    mechanism directly instead: for each team label, exactly that team's two
+    seats are controlled and the other two run the opponent spec.
+    """
+    spec = OpponentSpec(kind="greedy")
+    for team in (0, 1):
+        env = _team_env_for(spec, team)
+        assert env.control_partner is True
+        assert env.seat == team
+        opponent_seats = {(team + 1) % NUM_SEATS, (team + 3) % NUM_SEATS}
+        assert opponent_seats == {1, 3} if team == 0 else {0, 2}
+        for seat in opponent_seats:
+            assert isinstance(env.opponents[seat], GreedyPolicy)
+        # The controlled team's own two opponents-list entries are the same
+        # placeholder object and are never real opponents.
+        assert env.opponents[team] is env.opponents[(team + 2) % NUM_SEATS]
+        env.close()
+
+
+def test_run_team_gauntlet_shards_alternates_team_by_game_index() -> None:
+    """The default (``controlled_team=None``) must cover both team labels.
+
+    Pinning ``controlled_team=0`` or ``=1`` and summing must reproduce the
+    unpinned round exactly, proving the unpinned round really does split
+    games between the two labels rather than silently defaulting to one.
+    """
+    env = make_env(rank=0, seed=0)
+    model = tiny_model(env)
+    model.learn(total_timesteps=128)
+    spec = OpponentSpec(kind="greedy")
+    with tempfile.TemporaryDirectory() as tmp:
+        model_path = f"{tmp}/m.zip"
+        model.save(model_path)
+        both = run_team_gauntlet_shards(model_path, spec, n_games=10, n_workers=2, seed=9)
+        team0 = run_team_gauntlet_shards(
+            model_path, spec, n_games=10, n_workers=2, seed=9, controlled_team=0
+        )
+        team1 = run_team_gauntlet_shards(
+            model_path, spec, n_games=10, n_workers=2, seed=9, controlled_team=1
+        )
+        # Even-index games are team 0, odd-index games are team 1 (5 each).
+        even_from_team0 = sum(
+            int(_play_team_shard(model_path, spec, [i], round_seed=9, controlled_team=0))
+            for i in range(0, 10, 2)
+        )
+        odd_from_team1 = sum(
+            int(_play_team_shard(model_path, spec, [i], round_seed=9, controlled_team=1))
+            for i in range(1, 10, 2)
+        )
+    assert both == even_from_team0 + odd_from_team1
+    assert 0 <= team0 <= 10
+    assert 0 <= team1 <= 10
+    env.close()
+
+
+def test_team_gauntlet_callback_logs_expected_tag(tmp_path: Path) -> None:
+    env = make_env(rank=0, seed=0)
+    model = tiny_model(env)
+    recorded: dict[str, float] = {}
+
+    class RecordingWriter(NullWriter):
+        def write(self, key_values, key_excluded, step=0) -> None:  # type: ignore[no-untyped-def]
+            recorded.update(key_values)
+
+    model._logger = Logger(None, [RecordingWriter()])  # type: ignore[assignment]
+    callback = TeamGauntletCallback(
+        opponent=OpponentSpec(kind="greedy"),
+        name="greedy",
+        n_games=4,
+        eval_freq=10**9,
+        n_workers=2,
+        verbose=0,
+    )
+    callback.model = model
+    callback.num_timesteps = 0
+    callback._logger = model._logger
+    win_rate = callback.run_gauntlet()
+    model._logger.dump(step=0)
+    assert 0.0 <= win_rate <= 1.0
+    assert recorded.get("gauntlet/team_vs_greedy") == win_rate
+    env.close()
+
+
+def test_team_gauntlet_callback_rejects_zero_games() -> None:
+    with pytest.raises(ValueError, match="n_games must be positive"):
+        TeamGauntletCallback(
+            opponent=OpponentSpec(kind="greedy"),
+            name="greedy",
+            n_games=0,
+            eval_freq=1,
+        )
+
+
+def test_finetune_vs_greedy_cli_runs_and_wires_team_training(tmp_path: Path) -> None:
+    """Execution smoke test for the dedicated best-response fine-tune CLI.
+
+    Regression guard: nothing else in the suite ever invokes
+    ``finetune_vs_greedy.main`` -- a broken ``MaskablePPO.load`` override, a
+    callback wiring mistake, or an eval env that silently reverted to the
+    single-seat factory would all leave the rest of the suite green.
+    """
+    seed_env = make_env(rank=0, seed=0)
+    seed_model = tiny_model(seed_env)
+    seed_path = tmp_path / "seed.zip"
+    seed_model.save(str(seed_path))
+    seed_env.close()
+
+    out = tmp_path / "ft"
+    finetune_main(
+        [
+            "--resume",
+            str(seed_path),
+            "--total-timesteps",
+            "64",
+            "--n-envs",
+            "1",
+            "--n-steps",
+            "32",
+            "--batch-size",
+            "16",
+            "--n-epochs",
+            "1",
+            "--checkpoint-every",
+            "10000000",
+            "--eval-every",
+            "10000000",
+            "--eval-games",
+            "2",
+            "--eval-workers",
+            "1",
+            "--device",
+            "cpu",
+            "--out-dir",
+            str(out),
+            "--tensorboard-log",
+            str(tmp_path / "tb"),
+        ]
+    )
+    final = out / "final.zip"
+    assert final.is_file()
+    config = json.loads((out / "config.json").read_text())
+    assert config["opponent"].startswith("GreedyPolicy")
+
+    # The saved model must actually have trained in the team-controlled
+    # env: reloading and playing one team-vs-greedy game must not raise.
+    wins = run_team_gauntlet_shards(
+        str(final), OpponentSpec(kind="greedy"), n_games=1, n_workers=1, seed=0
+    )
+    assert wins in (0, 1)
+
+
+def test_finetune_vs_greedy_cli_hand_only_curriculum_runs(tmp_path: Path) -> None:
+    """Execution smoke test for the ``--hand-only`` curriculum path."""
+    seed_env = make_env(rank=0, seed=0)
+    seed_model = tiny_model(seed_env)
+    seed_path = tmp_path / "seed.zip"
+    seed_model.save(str(seed_path))
+    seed_env.close()
+
+    out = tmp_path / "ft_hand"
+    finetune_main(
+        [
+            "--resume",
+            str(seed_path),
+            "--hand-only",
+            "--hand-reward",
+            "1.0",
+            "--total-timesteps",
+            "64",
+            "--n-envs",
+            "1",
+            "--n-steps",
+            "32",
+            "--batch-size",
+            "16",
+            "--n-epochs",
+            "1",
+            "--checkpoint-every",
+            "10000000",
+            "--eval-every",
+            "10000000",
+            "--eval-games",
+            "2",
+            "--eval-workers",
+            "1",
+            "--device",
+            "cpu",
+            "--out-dir",
+            str(out),
+            "--tensorboard-log",
+            str(tmp_path / "tb"),
+        ]
+    )
+    final = out / "final.zip"
+    assert final.is_file()
+    config = json.loads((out / "config.json").read_text())
+    assert config["hand_only"] is True

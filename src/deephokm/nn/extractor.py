@@ -25,6 +25,7 @@ from deephokm.nn.tokenizer import (
     NUM_CONTEXT_TOKENS,
     NUM_POSITION_SLOTS,
     NUM_TYPES,
+    ROLE_VOCAB,
     TokenizedObservation,
     tokenize_tensor_batch,
 )
@@ -41,7 +42,10 @@ class HokmTransformerExtractor(BaseFeaturesExtractor):
     groups; learned positional embeddings mark order-sensitive slots (trick
     play order, history recency). Hand tokens carry no positional embedding —
     the hand is a set, so permuting hand tokens cannot change the pooled
-    features.
+    features. A learned relative-seat-role embedding (self / next seat
+    clockwise / partner / previous seat clockwise / not-applicable) is added
+    to every token, letting the network condition trick and history plays on
+    who played them without inferring it from card-id patterns alone.
 
     The history group spans the whole hand rather than the 13 most recent
     plays: knowing which cards are gone is the central read in a
@@ -52,7 +56,7 @@ class HokmTransformerExtractor(BaseFeaturesExtractor):
     with a single learned query. ``features_dim`` equals ``d_model`` by
     default.
 
-    Defaults: d_model=128, nhead=4, num_layers=3, dim_feedforward=512, GELU,
+    Defaults: d_model=256, nhead=8, num_layers=6, dim_feedforward=2048, GELU,
     dropout=0.0.
     """
 
@@ -60,10 +64,10 @@ class HokmTransformerExtractor(BaseFeaturesExtractor):
         self,
         observation_space: spaces.Dict,
         *,
-        d_model: int = 128,
-        nhead: int = 4,
-        num_layers: int = 3,
-        dim_feedforward: int = 512,
+        d_model: int = 256,
+        nhead: int = 8,
+        num_layers: int = 6,
+        dim_feedforward: int = 2048,
         features_dim: int | None = None,
     ) -> None:
         """Create the extractor.
@@ -95,6 +99,7 @@ class HokmTransformerExtractor(BaseFeaturesExtractor):
         self.card_embedding = th.nn.Embedding(NUM_CARD_TOKENS, d_model)
         self.type_embedding = th.nn.Embedding(NUM_TYPES, d_model)
         self.position_embedding = th.nn.Embedding(NUM_POSITION_SLOTS, d_model)
+        self.role_embedding = th.nn.Embedding(ROLE_VOCAB, d_model)
         self.context_embeddings = th.nn.ModuleList(
             [th.nn.Embedding(vocab, d_model) for vocab in CONTEXT_VOCABS]
         )
@@ -163,8 +168,9 @@ class HokmTransformerExtractor(BaseFeaturesExtractor):
         with_context: th.Tensor = x.index_copy(1, self.ctx_columns, context_stack)
 
         typed = with_context + self.type_embedding(tokens.type_ids)
-        positioned: th.Tensor = typed + self.position_embedding(tokens.positions)
-        return positioned
+        positioned = typed + self.position_embedding(tokens.positions)
+        roled: th.Tensor = positioned + self.role_embedding(tokens.roles)
+        return roled
 
     def _pool(self, x: th.Tensor, padding_mask: th.Tensor) -> th.Tensor:
         """Attention-pool the real tokens with a single learned query."""

@@ -19,6 +19,7 @@ from deephokm.nn.tokenizer import (
     CTX_COLUMNS,
     NUM_HAND_SLOTS,
     NUM_TRICK_SLOTS,
+    ROLE_NA,
     tokenize,
     tokenize_tensor_batch,
 )
@@ -210,7 +211,14 @@ def test_hand_order_invariance() -> None:
             tokens = self.inner(obs)
             hand = slice(0, 13)
             updates = {}
-            for field in ("tokens", "is_card", "type_ids", "padding_mask", "positions"):
+            for field in (
+                "tokens",
+                "is_card",
+                "type_ids",
+                "padding_mask",
+                "positions",
+                "roles",
+            ):
                 value = getattr(tokens, field)
                 updates[field] = th.cat([value[:, hand].flip(dims=[1]), value[:, 13:]], dim=1)
             return dataclasses.replace(tokens, **updates)
@@ -295,6 +303,55 @@ def test_trick_order_wrapping_case() -> None:
     assert t.tokens[0, 13:17].tolist() == [33, 27, 32, 52]
 
 
+def test_trick_and_hand_roles_are_relative_to_the_acting_seat() -> None:
+    """Role tokens must encode who played each card, relative to the actor.
+
+    Reusing the wrap-around trick from ``test_trick_order_wrapping_case``
+    (leader 2, play order seats 2, 3, 0) with the acting seat set to 1: role
+    is ``(played_seat - acting_seat) % NUM_SEATS``, so the expected roles in
+    play order are 1 (seat 2), 2 (seat 3), 3 (seat 0), then ROLE_NA padding.
+    Hand tokens (always the acting seat's own cards) must be role 0.
+    """
+    obs = empty_observation()
+    obs["trick_play"] = np.array([32, -1, 33, 27])
+    obs["hand"][10] = 1
+    obs["seat"][1] = 1
+    t = tokenize(obs)
+    trick_roles = t.roles[0, NUM_HAND_SLOTS : NUM_HAND_SLOTS + NUM_TRICK_SLOTS].tolist()
+    assert trick_roles == [1, 2, 3, ROLE_NA]
+    assert t.roles[0, 0].item() == 0  # the one hand card
+
+
+def test_history_roles_are_relative_to_the_acting_seat() -> None:
+    """History roles must track who actually played each historical card."""
+    env = HokmEnv(seat=2, opponents=[RandomPolicy(i) for i in range(NUM_SEATS)])
+    obs, info = env.reset(seed=17)
+    rng = np.random.default_rng(17)
+    done = False
+    saw_history = False
+    while not done:
+        history_role = np.asarray(obs["history_role"])
+        history = np.asarray(obs["history"])
+        real = history >= 0
+        if real.any():
+            saw_history = True
+            played = env.engine.state.hands.played
+            played_by = env.engine.state.hands.played_by
+            on_table = len(env.engine.state.hands.current_trick)
+            completed_cards = played[: len(played) - on_table]
+            completed_seats = played_by[: len(played_by) - on_table]
+            expected_cards = completed_cards[::-1]
+            expected_roles = [(s - env.seat) % NUM_SEATS for s in completed_seats[::-1]]
+            n = int(real.sum())
+            assert history[:n].tolist() == expected_cards
+            assert history_role[:n].tolist() == expected_roles
+        action = int(rng.choice(np.flatnonzero(info["action_mask"])))
+        obs, _reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+    assert saw_history, "the episode must reach at least one completed trick"
+    env.close()
+
+
 def test_seat_context_token_present() -> None:
     """The acting seat must be tokenized as a context value."""
     for seat in range(NUM_SEATS):
@@ -316,6 +373,7 @@ def test_tokenizers_agree() -> None:
             "is_card",
             "type_ids",
             "positions",
+            "roles",
             "context_values",
             "padding_mask",
         ):

@@ -43,6 +43,12 @@ class Observation(TypedDict):
         history: Box(48) — card ids from this hand's completed tricks in
             reverse play order (most recent first), -1 padded. Play order is
             not recoverable from ``seen``, so it is carried explicitly.
+        history_role: Box(48) — for each ``history`` slot, the seat that
+            played that card relative to the acting seat (0 self, 1 the next
+            seat clockwise, 2 partner, 3 the previous seat clockwise), -1
+            padded in lockstep with ``history``. Card identity alone does
+            not say who held it; partner-vs-opponent play is exactly what a
+            trick-taking player conditions on.
         trump: MultiBinary(4) — one-hot trump suit; all zeros before declared.
         phase: MultiBinary(2) — [trump-call, card-play].
         tricks_won: Box(2) — [own team, opposing team] tricks this hand.
@@ -55,6 +61,7 @@ class Observation(TypedDict):
     trick: np.ndarray
     trick_play: np.ndarray
     history: np.ndarray
+    history_role: np.ndarray
     trump: np.ndarray
     phase: np.ndarray
     tricks_won: np.ndarray
@@ -74,6 +81,9 @@ def observation_space() -> spaces.Dict:
             ),
             "history": spaces.Box(
                 low=-1, high=NUM_CARDS - 1, shape=(HISTORY_SLOTS,), dtype=np.int64
+            ),
+            "history_role": spaces.Box(
+                low=-1, high=NUM_SEATS - 1, shape=(HISTORY_SLOTS,), dtype=np.int64
             ),
             "trump": spaces.MultiBinary(NUM_SUITS),
             "phase": spaces.MultiBinary(2),
@@ -126,6 +136,10 @@ def observation_for(hands: HandState, seat: int, game_points: Sequence[int]) -> 
     recent = hands.played[:completed][::-1][:HISTORY_SLOTS]
     history[: len(recent)] = recent
 
+    history_role = np.full(HISTORY_SLOTS, -1, dtype=np.int64)
+    recent_seats = hands.played_by[:completed][::-1][:HISTORY_SLOTS]
+    history_role[: len(recent_seats)] = [(s - seat) % NUM_SEATS for s in recent_seats]
+
     trump = np.zeros(NUM_SUITS, dtype=np.int8)
     if hands.trump is not None:
         trump[hands.trump] = 1
@@ -152,6 +166,7 @@ def observation_for(hands: HandState, seat: int, game_points: Sequence[int]) -> 
         trick=trick,
         trick_play=trick_play,
         history=history,
+        history_role=history_role,
         trump=trump,
         phase=phase,
         tricks_won=tricks_won,
@@ -183,6 +198,7 @@ def empty_observation() -> Observation:
         trick=np.zeros(NUM_CARDS, dtype=np.int8),
         trick_play=np.full(NUM_SEATS, -1, dtype=np.int64),
         history=np.full(HISTORY_SLOTS, -1, dtype=np.int64),
+        history_role=np.full(HISTORY_SLOTS, -1, dtype=np.int64),
         trump=np.zeros(NUM_SUITS, dtype=np.int8),
         phase=np.zeros(2, dtype=np.int8),
         tricks_won=np.zeros(2, dtype=np.int64),

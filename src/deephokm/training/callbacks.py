@@ -15,7 +15,11 @@ from typing import Any
 
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 
-from deephokm.training.gauntlet_workers import OpponentSpec, run_gauntlet_shards
+from deephokm.training.gauntlet_workers import (
+    OpponentSpec,
+    run_gauntlet_shards,
+    run_team_gauntlet_shards,
+)
 from deephokm.training.selfplay import SNAPSHOT_GLOB, snapshot_step
 
 
@@ -235,3 +239,85 @@ class GauntletCallback(BaseCallback):
         self._last_eval_step = self.num_timesteps
         self._eval_count += 1
         return rates
+
+
+class TeamGauntletCallback(BaseCallback):
+    """Log the model's win rate controlling BOTH team seats against a fixed
+    opponent (see :func:`~deephokm.training.gauntlet_workers.run_team_gauntlet_shards`).
+
+    This is the metric a dedicated best-response fine-tune against a single
+    fixed opponent actually cares about: :class:`GauntletCallback` plays the
+    model in one seat only, with the opponent policy also filling the
+    learner's own partner seat, which understates a policy trained to control
+    a whole team.
+
+    Attributes:
+        opponent: The fixed opposing-team opponent specification.
+        n_games: Games per round.
+        eval_freq: Environment steps between rounds.
+    """
+
+    def __init__(
+        self,
+        *,
+        opponent: OpponentSpec,
+        name: str,
+        n_games: int,
+        eval_freq: int,
+        n_workers: int = 8,
+        verbose: int = 0,
+    ) -> None:
+        """Create the callback.
+
+        Args:
+            opponent: Opponent specification for the opposing team's two seats.
+            name: TensorBoard tag suffix (``gauntlet/team_vs_<name>``).
+            n_games: Games per round.
+            eval_freq: Environment steps between rounds.
+            n_workers: Processes sharing a round.
+            verbose: SB3 verbosity.
+
+        Raises:
+            ValueError: If ``n_games`` is not positive (a zero-game round
+                would divide by zero when computing the win rate).
+        """
+        if n_games <= 0:
+            raise ValueError(f"n_games must be positive, got {n_games}")
+        super().__init__(verbose)
+        self.opponent = opponent
+        self.name = name
+        self.n_games = n_games
+        self.eval_freq = eval_freq
+        self.n_workers = n_workers
+        self._last_eval_step = 0
+        self._eval_count = 0
+
+    def _on_step(self) -> bool:
+        """Run a round when the step cadence elapses."""
+        if self.num_timesteps - self._last_eval_step >= self.eval_freq:
+            self.run_gauntlet()
+        return True
+
+    def _on_training_end(self) -> None:
+        """Run a final round so the log ends on fresh numbers."""
+        self.run_gauntlet()
+
+    def run_gauntlet(self) -> float:
+        """Play one round and log the team win rate."""
+        with tempfile.TemporaryDirectory() as tmp:
+            model_path = str(Path(tmp) / "eval_model.zip")
+            self.model.save(model_path)
+            wins = run_team_gauntlet_shards(
+                model_path=model_path,
+                spec=self.opponent,
+                n_games=self.n_games,
+                n_workers=self.n_workers,
+                seed=self._eval_count,
+            )
+        win_rate = wins / self.n_games
+        self.logger.record(f"gauntlet/team_vs_{self.name}", win_rate)
+        if self.verbose:
+            print(f"[team-gauntlet] vs {self.name}: {win_rate:.3f} over {self.n_games} games")
+        self._last_eval_step = self.num_timesteps
+        self._eval_count += 1
+        return win_rate

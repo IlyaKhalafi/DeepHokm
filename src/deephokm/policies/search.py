@@ -37,12 +37,13 @@ which is a larger, separate piece of work.
 from __future__ import annotations
 
 import random
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
-from deephokm.cards import NUM_CARDS, NUM_RANKS
+from deephokm.cards import NUM_CARDS, NUM_RANKS, NUM_SUITS
 from deephokm.env.spaces import Observation, mask_for, observation_for
 from deephokm.rules.engine import ActionOutcome, HokmEngine
 from deephokm.rules.state import NUM_SEATS, HandState, MatchState, Phase, team_of
@@ -56,6 +57,132 @@ MAX_SAMPLE_ATTEMPTS = 200
 def _suit_of(card: int) -> int:
     """Return the suit id of a card id."""
     return card // NUM_RANKS
+
+
+def _build_suit_seat_flow_graph(
+    suit_counts: dict[int, int],
+    seats: list[int],
+    voids: list[set[int]],
+    remaining_sizes: list[int],
+    rng: random.Random,
+) -> dict[object, dict[object, int]]:
+    """Build the source -> suit -> seat -> sink flow graph for one split.
+
+    No edge exists for a seat's void suits, so any flow the graph admits is
+    void-respecting by construction. Edges are inserted in an ``rng``-shuffled
+    order (consumed by ``_bfs_augmenting_path`` iterating dict insertion
+    order) so that different calls can land on different vertex solutions
+    of the underlying transportation polytope -- see
+    ``_feasible_suit_seat_counts`` for why that matters.
+    """
+    graph: dict[object, dict[object, int]] = {}
+
+    def add_edge(u: object, v: object, cap: int) -> None:
+        graph.setdefault(u, {})[v] = graph.get(u, {}).get(v, 0) + cap
+        graph.setdefault(v, {}).setdefault(u, 0)
+
+    suit_items = list(suit_counts.items())
+    rng.shuffle(suit_items)
+    for suit, count in suit_items:
+        if count:
+            add_edge("source", ("suit", suit), count)
+    seat_order = list(seats)
+    rng.shuffle(seat_order)
+    for seat in seat_order:
+        if remaining_sizes[seat]:
+            add_edge(("seat", seat), "sink", remaining_sizes[seat])
+    for suit, count in suit_items:
+        if not count:
+            continue
+        seat_order = list(seats)
+        rng.shuffle(seat_order)
+        for seat in seat_order:
+            if suit not in voids[seat]:
+                add_edge(("suit", suit), ("seat", seat), count)
+    return graph
+
+
+def _bfs_augmenting_path(
+    graph: dict[object, dict[object, int]], source: object, sink: object
+) -> list[tuple[object, object]] | None:
+    parent: dict[object, object | None] = {source: None}
+    queue = deque([source])
+    while queue:
+        u = queue.popleft()
+        if u == sink:
+            path = []
+            v: object = sink
+            while v != source:
+                p = parent[v]
+                path.append((p, v))
+                v = p
+            return list(reversed(path))
+        for v, cap in graph.get(u, {}).items():
+            if cap > 0 and v not in parent:
+                parent[v] = u
+                queue.append(v)
+    return None
+
+
+def _feasible_suit_seat_counts(
+    suit_counts: dict[int, int],
+    seats: list[int],
+    voids: list[set[int]],
+    remaining_sizes: list[int],
+    rng: random.Random,
+) -> dict[int, dict[int, int]]:
+    """Find a void-respecting split of each suit's card count across seats.
+
+    Modeled as max-flow rather than a single greedy pass: a feasible split
+    is guaranteed to exist (the real, hidden deal this is standing in for
+    is itself a witness), but a greedy top-to-bottom assignment can miss
+    one even when it exists -- filling an unconstrained seat first can
+    strand a later, more constrained seat with only cards of a suit it
+    cannot hold. Max-flow finds a feasible split whenever one exists.
+
+    With no randomness anywhere, the *same* inputs would always produce
+    the *same* split -- repeated calls for one decision (which share the
+    same voids/sizes) would all collapse onto one effective world instead
+    of the independent determinizations this module relies on. Augmenting
+    a network flow along a different order of paths can land on a
+    different basic feasible solution (vertex) of the transportation
+    polytope, so ``_build_suit_seat_flow_graph`` inserts edges in an
+    ``rng``-shuffled order. This samples among the (generally few) *basic*
+    feasible vertices reachable this way, not uniformly over the full
+    feasible region (an interior mixed-suit split is not a vertex a
+    network-flow solution can land on at all) -- a real, disclosed
+    limitation, but a large improvement over a single deterministic split,
+    and this fallback triggers only in the rare cases dense-enough voids
+    make plain rejection sampling fail (see the caller).
+    """
+    source, sink = "source", "sink"
+    graph = _build_suit_seat_flow_graph(suit_counts, seats, voids, remaining_sizes, rng)
+
+    total_flow = 0
+    while (path := _bfs_augmenting_path(graph, source, sink)) is not None:
+        bottleneck = min(graph[u][v] for u, v in path)
+        for u, v in path:
+            graph[u][v] -= bottleneck
+            graph[v][u] += bottleneck
+        total_flow += bottleneck
+
+    total_needed = sum(remaining_sizes[s] for s in seats)
+    if total_flow != total_needed:
+        raise RuntimeError(
+            f"no void-respecting hand assignment exists: max flow {total_flow} != "
+            f"{total_needed} cards needed -- voids are inconsistent with the public state"
+        )
+
+    counts: dict[int, dict[int, int]] = {seat: dict.fromkeys(suit_counts, 0) for seat in seats}
+    for suit, count in suit_counts.items():
+        if not count:
+            continue
+        for seat in seats:
+            if suit in voids[seat]:
+                continue
+            used = count - graph[("suit", suit)][("seat", seat)]
+            counts[seat][suit] = used
+    return counts
 
 
 @dataclass
@@ -149,30 +276,37 @@ def sample_determinized_hands(
             break
     else:
         # Exhausted every attempt without a fully void-respecting whole-deal
-        # split. Falling back to an assignment that ignores voids entirely
-        # would let the rollout simulate a seat following a suit it has
-        # publicly proven it does not hold -- an impossible world, not just
-        # a low-probability one. Fall back to a constraint-respecting greedy
-        # assignment instead, giving void-constrained seats first pick of
-        # the (still fully available) pool: a seat with no voids can take
-        # any leftover card, but a voided seat filled last might find every
-        # remaining card is exactly the suit it cannot hold, even though a
-        # feasible assignment existed had it been filled earlier. Only
-        # cross a void when even priority placement cannot avoid it, which
-        # happens only when the voids are truly infeasible for this pool.
-        rng.shuffle(pool)
-        remaining = list(pool)
-        order = sorted(other_seats, key=lambda s: 0 if voids[s] else 1)
+        # split from plain rejection sampling. Falling back to an assignment
+        # that ignores voids entirely -- or a single greedy top-to-bottom
+        # pass -- would let the rollout simulate a seat following a suit it
+        # has publicly proven it does not hold: an impossible world, not
+        # just a low-probability one, and a single greedy pass can miss a
+        # feasible split that exists (filling an unconstrained seat first
+        # can strand a later, voided seat with only cards of its void
+        # suit). Solve for a feasible suit-count split directly via
+        # max-flow instead -- guaranteed to find one whenever it exists,
+        # which it always does here (the real, hidden deal is a witness).
+        suit_counts: dict[int, int] = dict.fromkeys(range(NUM_SUITS), 0)
+        for c in pool:
+            suit_counts[_suit_of(c)] += 1
+        per_seat_suit_counts = _feasible_suit_seat_counts(
+            suit_counts, other_seats, voids, remaining_sizes, rng
+        )
+        cards_by_suit: dict[int, list[int]] = {suit: [] for suit in suit_counts}
+        for c in pool:
+            cards_by_suit[_suit_of(c)].append(c)
+        for cards in cards_by_suit.values():
+            rng.shuffle(cards)
+        cursor = dict.fromkeys(suit_counts, 0)
         assignment = {}
-        for seat in order:
-            size = remaining_sizes[seat]
-            eligible = [c for c in remaining if _suit_of(c) not in voids[seat]]
-            chosen = eligible[:size]
-            if len(chosen) < size:
-                chosen += [c for c in remaining if c not in chosen][: size - len(chosen)]
-            assignment[seat] = chosen
-            for c in chosen:
-                remaining.remove(c)
+        for seat in other_seats:
+            hand: list[int] = []
+            for suit, count in per_seat_suit_counts[seat].items():
+                if count:
+                    start = cursor[suit]
+                    hand.extend(cards_by_suit[suit][start : start + count])
+                    cursor[suit] += count
+            assignment[seat] = hand
     return [
         list(root_hand) if seat == root_seat else assignment[seat] for seat in range(NUM_SEATS)
     ]
@@ -210,6 +344,7 @@ def _clone_for_simulation(
         leader=hands.leader,
         current_trick=list(hands.current_trick),
         played=list(hands.played),
+        played_by=list(hands.played_by),
         tricks_won=list(hands.tricks_won),
         trick_winners=list(hands.trick_winners),
         phase=hands.phase,

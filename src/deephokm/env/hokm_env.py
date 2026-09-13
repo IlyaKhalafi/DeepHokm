@@ -24,13 +24,14 @@ from deephokm.cards import card_name as _card_name
 from deephokm.env.masked_space import MaskedDiscrete
 from deephokm.env.spaces import (
     Observation,
+    empty_observation,
     mask_for,
     observation_for,
     observation_space,
 )
 from deephokm.rules import HokmEngine
 from deephokm.rules.legality import NUM_ACTIONS, is_trump_action, trump_action_to_suit
-from deephokm.rules.state import NUM_SEATS, team_of
+from deephokm.rules.state import NUM_SEATS, Phase, team_of, teammate
 
 if TYPE_CHECKING:  # pragma: no cover
     from deephokm.policies.base import HokmPolicy
@@ -48,6 +49,23 @@ class HokmEnv(gym.Env[Observation, np.integer]):
         trick_reward: Optional per-trick shaping magnitude (default 0).
         hand_reward: Optional per-hand shaping magnitude (default 0).
         render_mode: ``"human"`` prints a trick log; ``None`` is silent.
+        control_partner: When ``True``, the learner also controls ``seat``'s
+            partner: ``step()`` accepts an action for whichever of the two
+            controlled seats is next to act, and observations/masks switch to
+            match. Both entries of ``opponents`` for the controlled team are
+            ignored (as the learner's own entry already is). Rewards are
+            unaffected — they were already computed per-team, not per-seat.
+            Off by default, preserving the original one-seat contract.
+        hand_only: When ``True``, the episode ends at the first completed
+            hand rather than playing out the whole match. A curriculum knob:
+            a full match is a long, sparse-reward episode (~13 tricks per
+            hand times however many hands it takes one team to reach 7
+            points) that is a much noisier credit-assignment problem than a
+            single hand. The underlying engine still deals the next hand
+            internally when one finishes (it has no "pause here" mode), but
+            the environment simply never plays into it -- the episode is
+            already over from the caller's perspective, and the next
+            ``reset()`` starts a fresh match regardless.
     """
 
     metadata: dict[str, Any] = {"render_modes": ["human"], "render_fps": 1}
@@ -61,14 +79,16 @@ class HokmEnv(gym.Env[Observation, np.integer]):
         render_mode: str | None = None,
         opponent_provider: Callable[[], list[HokmPolicy]] | None = None,
         hand_reward: float = 0.0,
+        control_partner: bool = False,
+        hand_only: bool = False,
     ) -> None:
         """Create the environment.
 
         Args:
             seat: The seat controlled by the learning agent (0-3).
             opponents: A length-4 list of policies indexed by seat id; the
-                learner's entry is ignored. Defaults to uniform random
-                policies.
+                learner's entry (and its partner's, when ``control_partner``)
+                is ignored. Defaults to uniform random policies.
             trick_reward: Magnitude of optional +/- shaping per trick won/lost.
                 Every trick pays the same, whether it decides a close hand or
                 mops up an already-settled one, so a large value can dominate
@@ -83,6 +103,8 @@ class HokmEnv(gym.Env[Observation, np.integer]):
                 points). Coarser than ``trick_reward`` and closer to what
                 actually matters -- it rewards winning the hand, not padding
                 a trick count that is already decided.
+            control_partner: See the class docstring.
+            hand_only: See the class docstring.
 
         Raises:
             ValueError: If the seat is out of range or a mask bug surfaces.
@@ -91,6 +113,9 @@ class HokmEnv(gym.Env[Observation, np.integer]):
         if not 0 <= seat < NUM_SEATS:
             raise ValueError(f"seat must be in [0, {NUM_SEATS}), got {seat}")
         self.seat = seat
+        self.control_partner = control_partner
+        self._controlled_seats = {seat, teammate(seat)} if control_partner else {seat}
+        self._acting_seat = seat
         if opponents is None:
             # Imported lazily: policies depend on env.spaces, so a top-level
             # import here would create an import cycle.
@@ -108,6 +133,7 @@ class HokmEnv(gym.Env[Observation, np.integer]):
         self.opponent_provider = opponent_provider
         self.trick_reward = trick_reward
         self.hand_reward = hand_reward
+        self.hand_only = hand_only
         self.render_mode = render_mode
         self.action_space = MaskedDiscrete(NUM_ACTIONS, legal_provider=self._sample_legal_actions)
         # spaces.Dict is invariant; the TypedDict Observation describes the
@@ -120,6 +146,8 @@ class HokmEnv(gym.Env[Observation, np.integer]):
         self._last_info: dict[str, Any] = {}
         self._pending_reward = 0.0
         self._terminated = False
+        self._hand_over_early = False
+        self._hand_over_early_hand_number: int | None = None
         self._render_lines: list[str] = []
 
     # ------------------------------------------------------------------ API
@@ -149,6 +177,8 @@ class HokmEnv(gym.Env[Observation, np.integer]):
         self._reset_opponents(seed)
         self._terminated = False
         self._pending_reward = 0.0
+        self._hand_over_early = False
+        self._hand_over_early_hand_number = None
         self._render_lines = [self._render_header()]
         obs, info = self._advance_to_learner()
         self._maybe_render_obs(obs)
@@ -205,14 +235,19 @@ class HokmEnv(gym.Env[Observation, np.integer]):
             raise RuntimeError("episode is over; call reset() first")
         if not self._action_mask[int(action)]:
             raise ValueError(
-                f"illegal action {action} for seat {self.seat}; this indicates an action-mask bug"
+                f"illegal action {action} for seat {self._acting_seat}; "
+                "this indicates an action-mask bug"
             )
 
         self._apply_learner_action(int(action))
+        # _advance_to_learner()'s loop already no-ops when the match or (with
+        # hand_only) the hand just ended -- its while condition is false from
+        # the start, and it falls straight through to refreshing the mask and
+        # building the (unused, since terminated=True) terminal observation.
         obs, info = self._advance_to_learner()
         reward = self._pending_reward
         self._pending_reward = 0.0
-        terminated = self._engine.state.winner is not None
+        terminated = self._engine.state.winner is not None or self._hand_over_early
         self._terminated = terminated
         self._maybe_render_obs(obs)
         return obs, reward, terminated, False, info
@@ -249,10 +284,12 @@ class HokmEnv(gym.Env[Observation, np.integer]):
         self._accumulate_rewards(outcome)
 
     def _advance_to_learner(self) -> tuple[Observation, dict[str, Any]]:
-        """Run opponents until the learner's turn or the match ends."""
-        while self._engine.state.winner is None:
+        """Run opponents until a controlled seat's turn, a hand ends (when
+        ``hand_only``), or the match ends."""
+        while self._engine.state.winner is None and not self._hand_over_early:
             seat = self._engine.current_seat()
-            if seat == self.seat:
+            if seat in self._controlled_seats:
+                self._acting_seat = seat
                 break
             mask = self._mask_for(seat)
             obs = self._observation_for(seat)
@@ -264,8 +301,23 @@ class HokmEnv(gym.Env[Observation, np.integer]):
             if is_trump_action(action):
                 self._render_trump(trump_action_to_suit(action))
             self._accumulate_rewards(outcome)
+        if self._hand_over_early:
+            # The engine already redealt internally by this point (it has no
+            # "pause after one hand" mode): self._engine.state.hands is a
+            # *different*, freshly-started hand, not the one that just ended.
+            # Returning an observation/mask built from it would silently
+            # leak a wrong hand_number and a stale-acting-seat mask into
+            # what is supposed to be a terminal transition. Since terminated
+            # transitions are never bootstrapped off their observation (SB3
+            # only does that for truncated ones, and this env always reports
+            # truncated=False), the content is inert for training, but
+            # honesty matters for every other consumer (logging, callbacks,
+            # future features) -- report an explicit empty/terminal state
+            # instead of fabricating one from the wrong hand.
+            self._action_mask = mask_for([])
+            return empty_observation(), self._info()
         self._refresh_mask()
-        obs = self._observation_for(self.seat)
+        obs = self._observation_for(self._acting_seat)
         return obs, self._info()
 
     def _accumulate_rewards(self, outcome: Any) -> None:
@@ -289,17 +341,34 @@ class HokmEnv(gym.Env[Observation, np.integer]):
             match_winner = outcome.match_winner_team
             assert match_winner is not None
             self._pending_reward += 1.0 if match_winner == own else -1.0
+        if self.hand_only and outcome.hand_complete:
+            self._hand_over_early = True
+            # The engine has already incremented hand_number and dealt the
+            # next hand by the time this outcome is processed (unless the
+            # match itself just ended too, which cannot happen on hand_only's
+            # first hand -- a hand awards exactly one game point, nowhere
+            # near the 7 needed to end a fresh match). Recover the number of
+            # the hand that actually just ended for _info() to report.
+            self._hand_over_early_hand_number = (
+                self._engine.state.hand_number - 1
+                if not outcome.match_complete
+                else self._engine.state.hand_number
+            )
 
     def _refresh_mask(self) -> None:
-        """Recompute the learner's action mask from the live state."""
-        legal = self._engine.legal_actions(self.seat) if self._engine.state.winner is None else []
+        """Recompute the acting seat's action mask from the live state."""
+        legal = (
+            self._engine.legal_actions(self._acting_seat)
+            if self._engine.state.winner is None
+            else []
+        )
         self._action_mask = mask_for(legal)
 
     def _sample_legal_actions(self) -> list[int]:
         """Legal action ids for the action space's masked sampler."""
-        if self._engine.state.winner is not None:
+        if self._engine.state.winner is not None or self._hand_over_early:
             return []
-        return self._engine.legal_actions(self.seat)
+        return self._engine.legal_actions(self._acting_seat)
 
     def _mask_for(self, seat: int) -> np.ndarray:
         """Return the action mask for an arbitrary seat."""
@@ -307,6 +376,16 @@ class HokmEnv(gym.Env[Observation, np.integer]):
 
     def _info(self) -> dict[str, Any]:
         """Build the info dict returned with every observation."""
+        if self._hand_over_early:
+            # The engine has already moved on to a new hand internally; none
+            # of these should describe it (see _advance_to_learner).
+            assert self._hand_over_early_hand_number is not None
+            return {
+                "action_mask": self._action_mask.copy(),
+                "hand_number": self._hand_over_early_hand_number,
+                "phase": Phase.HAND_OVER.name,
+                "current_seat": -1,
+            }
         return {
             "action_mask": self._action_mask.copy(),
             "hand_number": self._engine.state.hand_number,

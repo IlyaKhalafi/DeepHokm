@@ -9,6 +9,17 @@ in ``_build``; this subclass pins them by test rather than by re-implementation.
 
 Logit masking is handled entirely by ``MaskablePPO`` — nothing here
 re-implements it.
+
+``share_features_extractor`` defaults to ``False``: a behavioral-cloning warm
+start only optimizes action log-probability (see
+``training/behavioral_cloning.py``), so the value head is still at its random
+initialization the moment PPO fine-tuning begins. With a shared extractor,
+the value loss's gradients (``vf_coef=0.5`` by default) flow into the exact
+transformer weights the BC phase carefully tuned to imitate the target
+policy, before the critic has any accurate signal to contribute -- a
+plausible mechanism for the plateau this project's fine-tuning attempts hit
+repeatedly (see REVIEW_LOG.local.md). A dedicated critic extractor lets the
+value head catch up without perturbing the actor's starting representation.
 """
 
 from __future__ import annotations
@@ -30,7 +41,9 @@ class HokmMaskablePolicy(MaskableActorCriticPolicy):
     ``net_arch`` defaults to an empty list so the transformer's pooled output
     feeds the policy and value heads directly. Orthogonal initialization runs
     with the parent's gain table: sqrt(2) for the extractor, 0.01 for the
-    action net, 1.0 for the value net.
+    action net, 1.0 for the value net. ``share_features_extractor`` defaults
+    to ``False`` (a separate extractor instance for the value head; see the
+    module docstring for why).
     """
 
     def __init__(
@@ -49,6 +62,7 @@ class HokmMaskablePolicy(MaskableActorCriticPolicy):
         """
         kwargs.setdefault("features_extractor_class", HokmTransformerExtractor)
         kwargs.setdefault("net_arch", [])
+        kwargs.setdefault("share_features_extractor", False)
         super().__init__(
             observation_space,
             action_space,

@@ -6,6 +6,7 @@ import copy
 import random
 
 import numpy as np
+import pytest
 from sb3_contrib import MaskablePPO
 
 from deephokm.env.hokm_env import HokmEnv
@@ -101,14 +102,18 @@ def test_sample_determinized_hands_rejects_mismatched_sizes() -> None:
     raise AssertionError("expected a ValueError for a size/pool mismatch")
 
 
-def test_sample_determinized_hands_falls_back_when_voids_make_it_infeasible() -> None:
-    """Regression: an exhausted attempt budget must not raise KeyError.
+def test_sample_determinized_hands_raises_when_voids_make_it_truly_infeasible() -> None:
+    """A truly infeasible void set must raise, never silently cross a void.
 
     All of the unseen pool is suit 0; every other seat is marked void in
     suit 0, so no assignment -- constrained or not -- can ever satisfy
-    every seat's voids simultaneously. The sampler must still return a
-    complete, correctly-sized assignment (falling back to a best-effort
-    split) instead of crashing on a partially-built assignment dict.
+    every seat's voids simultaneously. This can never happen for a real,
+    live game state (whatever the actual hidden deal is, it is itself a
+    witness that a feasible assignment exists), so this construction is
+    deliberately artificial. The old fallback used to paper over exactly
+    this case by silently assigning a void-suit card anyway -- simulating
+    a seat following a suit it has publicly proven it does not hold, an
+    impossible world. The fix must fail loudly instead.
     """
     root_seat = 0
     root_hand = [40, 41]  # suit 3 cards, irrelevant to the pool
@@ -117,12 +122,10 @@ def test_sample_determinized_hands_falls_back_when_voids_make_it_infeasible() ->
     voids: list[set[int]] = [set(), {0}, {0}, {0}]
 
     rng = random.Random(0)
-    hands = sample_determinized_hands(
-        root_seat, root_hand, unseen_pool, remaining_sizes, voids=voids, rng=rng, max_attempts=5
-    )
-    assert [len(h) for h in hands] == remaining_sizes
-    all_assigned = sorted(c for seat in range(1, NUM_SEATS) for c in hands[seat])
-    assert all_assigned == sorted(unseen_pool)
+    with pytest.raises(RuntimeError, match="no void-respecting hand assignment exists"):
+        sample_determinized_hands(
+            root_seat, root_hand, unseen_pool, remaining_sizes, voids=voids, rng=rng, max_attempts=5
+        )
 
 
 def test_fallback_still_respects_voids_when_feasible() -> None:

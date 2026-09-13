@@ -574,3 +574,213 @@ def test_history_resets_between_hands() -> None:
             checked += 1
     assert checked > 0, "the episode must span more than one hand"
     env.close()
+
+
+def test_control_partner_switches_between_both_team_seats() -> None:
+    """With ``control_partner=True``, decisions alternate between the two
+    controlled team seats instead of only ever visiting ``seat``, and every
+    per-turn observation/mask must agree with the live engine state for
+    whichever seat is actually acting -- not a stale or wrong-seat mask.
+    """
+    opponents = random_opponents(4)
+    env = HokmEnv(seat=0, opponents=opponents, control_partner=True)
+    obs, info = env.reset(seed=4)
+    seen_seats: set[int] = set()
+    rng = random.Random(4)
+    done = False
+    while not done:
+        acting_seat = int(np.argmax(obs["seat"]))
+        assert acting_seat == env.engine.current_seat()
+        seen_seats.add(acting_seat)
+        mask = info["action_mask"]
+        expected_mask = np.zeros(NUM_ACTIONS, dtype=np.int8)
+        expected_mask[env.engine.legal_actions(acting_seat)] = 1
+        assert np.array_equal(mask, expected_mask)
+        assert np.array_equal(env.action_masks(), expected_mask)
+        action = int(rng.choice(np.flatnonzero(mask).tolist()))
+        obs, _reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+    assert seen_seats == {0, 2}
+    env.close()
+
+
+def test_control_partner_reward_matches_actual_team_outcome() -> None:
+    """Rewards earned while control_partner alternates seats must sum to the
+    real match/hand outcome for the controlled team -- not zero (which a
+    broken team-reward wiring could produce) and not double- or under-counted
+    from crediting the wrong seat's team on a mid-episode seat switch.
+    """
+    opponents = random_opponents(7)
+    env = HokmEnv(seat=1, opponents=opponents, control_partner=True, hand_reward=0.15)
+    obs, info = env.reset(seed=7)
+    rng = random.Random(7)
+    total_reward = 0.0
+    done = False
+    while not done:
+        action = int(rng.choice(np.flatnonzero(info["action_mask"]).tolist()))
+        obs, reward, terminated, truncated, info = env.step(action)
+        total_reward += reward
+        done = terminated or truncated
+    winner = env.engine.state.winner
+    assert winner is not None
+    # The terminal +/-1 dominates any per-hand +/-0.15 shaping, so the total
+    # reward's sign must match whichever team the controlled seats belong to
+    # actually winning -- this would fail under a bug that credited rewards
+    # to the wrong team whenever the acting seat switched mid-episode.
+    assert (total_reward > 0) == (winner == team_of(1))
+    env.close()
+
+
+def test_control_partner_opponents_are_never_consulted_for_controlled_seats() -> None:
+    """The opponent list entries for both controlled seats must be unused.
+
+    A ``None`` placeholder would crash ``.act()`` if the environment ever
+    mistakenly dispatched a controlled seat's decision to the opponent list.
+    """
+    opponents: list = [None, RandomPolicy(1), None, RandomPolicy(1)]
+    env = HokmEnv(seat=0, opponents=opponents, control_partner=True)
+    obs, info = env.reset(seed=1)
+    done = False
+    while not done:
+        action = int(np.flatnonzero(info["action_mask"])[0])
+        obs, _reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+    env.close()
+
+
+def test_control_partner_off_by_default_matches_original_contract() -> None:
+    """``control_partner`` defaults to False, preserving single-seat behaviour."""
+    env = HokmEnv(seat=1, opponents=random_opponents(2))
+    assert env.control_partner is False
+    obs, info = env.reset(seed=2)
+    done = False
+    while not done:
+        assert int(np.argmax(obs["seat"])) == 1
+        action = int(np.flatnonzero(info["action_mask"])[0])
+        obs, _reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+    env.close()
+
+
+def test_hand_only_episode_ends_after_the_first_hand() -> None:
+    """``hand_only=True`` must terminate at the first completed hand.
+
+    A full match rarely finishes in one hand (it takes 7 game points), so an
+    episode running for TRICKS_PER_HAND * NUM_SEATS actions or fewer and
+    ending with ``terminated=True`` while the match is very likely still
+    undecided is the signature of the curriculum knob working, not a
+    coincidental early match win.
+    """
+    env = HokmEnv(
+        seat=0, opponents=random_opponents(11), hand_only=True, hand_reward=1.0
+    )
+    obs, info = env.reset(seed=11)
+    steps = 0
+    done = False
+    while not done:
+        action = int(np.flatnonzero(info["action_mask"])[0])
+        obs, reward, terminated, truncated, info = env.step(action)
+        steps += 1
+        done = terminated or truncated
+    assert terminated is True
+    assert truncated is False
+    # At most one hand's worth of the controlled seat's own decisions
+    # (13 tricks + at most one trump call) plus some slack for edge cases.
+    assert steps <= TRICKS_PER_HAND + 2, steps
+    assert reward in (1.0, -1.0)
+    env.close()
+
+
+def test_hand_only_terminal_transition_never_leaks_the_next_hand() -> None:
+    """Regression: the engine deals the next hand internally the instant the
+    first one ends (it has no "pause here" mode); the terminal
+    observation/info must describe episode-over, not that silently-dealt
+    second hand.
+
+    Caught for real during review: the terminal info previously reported
+    ``hand_number == 2`` and a mask/observation built from the *new* hand
+    using the stale seat that acted last in the *old* one -- sometimes an
+    all-legal mask for whoever happened to be the new hakem, sometimes an
+    all-illegal one. Checked across both ``control_partner`` settings and
+    both possible hand-enders (the controlled seat's own action, or an
+    opponent's), over enough seeds to hit both.
+    """
+    for control_partner in (False, True):
+        seat_seen_ending = {"controlled": 0, "opponent": 0}
+        for seed in range(60):
+            opponents = random_opponents(seed * 10)
+            env = HokmEnv(
+                seat=seed % NUM_SEATS,
+                opponents=opponents,
+                control_partner=control_partner,
+                hand_only=True,
+                hand_reward=1.0,
+            )
+            ending_seats: list[int] = []
+            orig_accumulate = env._accumulate_rewards
+
+            def _record(
+                outcome: object,
+                _orig: object = orig_accumulate,
+                _ending_seats: list[int] = ending_seats,
+            ) -> None:
+                if getattr(outcome, "hand_complete", False):
+                    _ending_seats.append(outcome.seat)  # type: ignore[attr-defined]
+                _orig(outcome)  # type: ignore[operator]
+
+            env._accumulate_rewards = _record  # type: ignore[method-assign]
+            obs, info = env.reset(seed=seed)
+            done = False
+            while not done:
+                action = int(np.flatnonzero(info["action_mask"])[0])
+                obs, _reward, terminated, truncated, info = env.step(action)
+                done = terminated or truncated
+            assert info["hand_number"] == 1, info["hand_number"]
+            assert info["phase"] == "HAND_OVER"
+            assert info["current_seat"] == -1
+            assert not info["action_mask"].any(), "terminal mask must be all-illegal"
+            assert not obs["hand"].any() and not obs["seen"].any(), "must not be the new hand"
+            ending_seat = ending_seats[-1]
+            key = "controlled" if ending_seat in env._controlled_seats else "opponent"
+            seat_seen_ending[key] += 1
+            # Playing straight into a second episode must start a genuinely
+            # fresh, playable hand -- not carry over the terminated flag.
+            obs2, info2 = env.reset()
+            assert env._hand_over_early is False
+            assert info2["hand_number"] == 1
+            assert info2["action_mask"].any()
+            env.close()
+        assert seat_seen_ending["opponent"] > 0, "seeds must cover an opponent-ended hand"
+
+
+def test_hand_only_reward_matches_hand_outcome_not_match_outcome() -> None:
+    """The terminal reward must be the hand's own outcome (+/- hand_reward),
+    never accidentally the sparse +/-1 match reward (which cannot have fired
+    yet -- match_complete implies hand_complete, but a single hand practically
+    never decides a 7-point match)."""
+    env = HokmEnv(
+        seat=2, opponents=random_opponents(13), hand_only=True, hand_reward=0.37
+    )
+    obs, info = env.reset(seed=13)
+    done = False
+    while not done:
+        action = int(np.flatnonzero(info["action_mask"])[0])
+        obs, reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+    assert abs(reward) == pytest.approx(0.37)
+    env.close()
+
+
+def test_hand_only_false_by_default_plays_a_full_match() -> None:
+    """Regression guard: the new flag must not change existing behaviour
+    when left at its default."""
+    env = HokmEnv(seat=0, opponents=random_opponents(3))
+    assert env.hand_only is False
+    obs, info = env.reset(seed=3)
+    done = False
+    while not done:
+        action = int(np.flatnonzero(info["action_mask"])[0])
+        obs, _reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+    assert env.engine.state.winner is not None
+    env.close()

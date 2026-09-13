@@ -168,6 +168,7 @@ class HokmEngine:
         hands.remove_card(seat, card)
         hands.current_trick.append((seat, card))
         hands.played.append(card)
+        hands.played_by.append(seat)
 
         if len(hands.current_trick) < NUM_SEATS:
             return ActionOutcome(seat=seat, action=action, card=card)
