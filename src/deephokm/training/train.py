@@ -27,6 +27,7 @@ from stable_baselines3.common.utils import LinearSchedule
 
 from deephokm.env import HokmEnv
 from deephokm.nn.policy import HokmMaskablePolicy
+from deephokm.nn.extractors_alt import HokmLSTMExtractor
 from deephokm.training.callbacks import (
     GauntletCallback,
     RollingCheckpointCallback,
@@ -66,7 +67,7 @@ DEFAULT_N_STEPS = 256
 # no longer matter. hand_reward is the coarser, better-aligned signal — it
 # only pays out at the point a hand's outcome is actually decided — so it
 # replaces trick-level shaping as the default and trick_reward defaults to 0.
-DEFAULT_TRICK_REWARD = 0.0
+DEFAULT_TRICK_REWARD = 0.10
 DEFAULT_HAND_REWARD = 0.30
 DEFAULT_GAMMA = 0.997
 
@@ -77,6 +78,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--total-timesteps", type=int, default=1_000_000)
     parser.add_argument("--n-envs", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--extractor", type=str, default="transformer", choices=["transformer", "lstm"])
     parser.add_argument("--trick-reward", type=float, default=DEFAULT_TRICK_REWARD)
     parser.add_argument("--hand-reward", type=float, default=DEFAULT_HAND_REWARD)
     parser.add_argument("--gamma", type=float, default=DEFAULT_GAMMA)
@@ -253,6 +255,8 @@ def main(argv: list[str] | None = None) -> None:
         # match outcome, not training-time shaping.
         return make_env(rank=0, seed=args.seed + 10_000)
 
+    policy_kwargs = {}
+
     model_kwargs: dict[str, Any] = dict(
         policy=HokmMaskablePolicy,
         env=train_env,
@@ -260,6 +264,7 @@ def main(argv: list[str] | None = None) -> None:
         seed=args.seed,
         device=args.device,
         verbose=1,
+        policy_kwargs=policy_kwargs,
         **hyperparameters(args.n_steps, args.gamma),
     )
 
