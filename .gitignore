@@ -222,3 +222,7 @@ __marimo__/
 logs/
 checkpoints/
 figures/
+
+# Scratch experiment datasets (large pickles, regenerable)
+scratch/*.pkl
+scratch/shard_*.pkl
