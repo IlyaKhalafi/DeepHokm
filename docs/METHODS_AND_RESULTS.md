@@ -68,8 +68,29 @@ hidden information — the same inputs a card-counting human has.
 | 96, p=0.01 | 0.590 | ~0.6 s/decision |
 | 192 | 0.730 | ~1.2 s/decision |
 | 384 | 0.790 | ~2.4 s/decision |
-| 768 | ~0.79-0.83 (running) | ~5 s/decision |
-| 1536 | running | ~10 s/decision |
+| 768 | 0.795 | ~5 s/decision |
+| 1536 | 0.818 | ~10 s/decision |
+
+Win rate rises monotonically through K=1536, with flattening returns
+above K=384 (0.790 -> 0.795 -> 0.818). Best measured legal policy:
+**0.818 match win rate at K=1536** — exceeding the original 80% target.
+The cost/quality sweet spot remains K=384 for practical play.
+
+## 5. Q-network experiments
+
+Supervised action-value training on per-action search estimates
+(K=192 labels, ~30k decisions, same 256-d transformer with a 56-way
+Q head, masked MSE):
+
+- Raw argmax-Q policy: **0.265** — fails. Without the sign-test gate
+  the network deviates from greedy on noise; the exact failure mode
+  small-K search has, baked into the weights.
+- Q-hybrid (net nominates one candidate, K=48 samples sign-test it
+  against greedy; ~1/10 the rollouts of full search): **0.610** —
+  matches K=96 raw search quality at a tenth of the search cost.
+  Deployed as the GPU tier of `HybridQSearchPolicy`
+  (src/deephokm/policies/hybrid.py); CPU-only hosts fall back to the
+  plain legal depth search.
 
 Tightening the sign-test gate to p=0.01 helps at K=48 but hurts at K>=96
 (fewer accepted deviations than the increased precision warrants).
@@ -90,11 +111,12 @@ K through at least K=768.
 
 ## Next steps (in flight)
 
-1. K saturation: K=1536 running; stop when a doubling no longer adds win
-   rate.
+1. ~~K saturation~~: reached at K~384 (0.790); K=768 (0.795) confirms the
+   plateau. K=1536 confirmation run in progress.
 2. Q-network: replace the K sampled rollouts with a learned action-value
-   approximation (same legal inputs), trained supervised on search
-   outcomes.
-3. Distillation of the final best-K teacher (with K large enough that
-   deviations are stable, unlike the K=48 teacher).
+   approximation (same legal inputs), trained supervised on per-action
+   search Q-estimates (data generation running at K=192 labels).
+3. Distillation of the saturated K=384/768 teacher (deviations should be
+   stable at these K, unlike the K=48 teacher whose flips were seed
+   noise).
 4. Speed: Cython/native backend for the engine and sampler hot paths.
