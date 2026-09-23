@@ -97,10 +97,8 @@ def rollout_to_hand_end(
         seat = engine.current_seat()
         hands = engine.state.hands
         legal = engine.legal_actions(seat)
-        obs = observation_for(hands, seat, engine.state.game_points)
-        mask = mask_for(legal)
-        action = greedy.act(obs, mask)
-        outcome = engine.apply_action(action, seat=seat)
+        action = greedy.play_from_state(hands.trump, hands.current_trick, seat, legal)
+        outcome = engine.apply_action(action, seat=seat, _legal=legal)
         if outcome.hand_complete:
             assert outcome.hand_winner_team is not None
             return 1.0 if outcome.hand_winner_team == root_team else -1.0
@@ -231,7 +229,11 @@ class CounterfactualSearchPolicy:
         return rollout_to_hand_end(sim_engine, root_team, self.greedy, self.max_rollout_plies)
 
     def _samplers(
-        self, engine: HokmEngine, root_seat: int, root_team: int
+        self,
+        engine: HokmEngine,
+        root_seat: int,
+        root_team: int,
+        clone_rng: random.Random,
     ) -> tuple[Callable[[], list[list[int]]], Callable[[int, list[list[int]]], float]]:
         """Build this decision's ``sample_world``/``score_action`` closures."""
         hands = engine.state.hands
@@ -251,7 +253,7 @@ class CounterfactualSearchPolicy:
             )
 
         def score_action(action: int, sampled_hands: list[list[int]]) -> float:
-            sim_engine = _clone_for_simulation(engine, root_seat, sampled_hands)
+            sim_engine = _clone_for_simulation(engine, root_seat, sampled_hands, rng=clone_rng)
             outcome = sim_engine.apply_action(action, seat=root_seat)
             if outcome.hand_complete:
                 assert outcome.hand_winner_team is not None
@@ -340,7 +342,12 @@ class CounterfactualSearchPolicy:
 
         root_team = team_of(root_seat)
         greedy_action = self._greedy_action(hands, root_seat, game_points, legal)
-        sample_world, score_action = self._samplers(engine, root_seat, root_team)
+        # One hoisted clone RNG per decision (a fresh, unseeded instance is
+        # what the clones used to get each -- and clones only ever consume
+        # it via a simulated hand's redeal, into state the caller discards),
+        # so the determinization stream on self._rng is untouched.
+        clone_rng = random.Random()
+        sample_world, score_action = self._samplers(engine, root_seat, root_team, clone_rng)
 
         n_select = self.n_samples // 2
         n_eval = self.n_samples - n_select

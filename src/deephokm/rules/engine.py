@@ -126,13 +126,21 @@ class HokmEngine:
             seat = self.current_seat()
         return action in self.legal_actions(seat)
 
-    def apply_action(self, action: int, seat: int | None = None) -> ActionOutcome:
+    def apply_action(
+        self, action: int, seat: int | None = None, _legal: list[int] | None = None
+    ) -> ActionOutcome:
         """Apply an action and return the resulting transition.
 
         Args:
             action: Action id in ``0..55``.
             seat: The acting seat; defaults to the current seat. Passing a
                 seat that is not the current one is an error.
+            _legal: Precomputed legal actions for ``seat``. Simulation-only
+                fast path: callers that already derived legality (e.g. the
+                rollout loop, which chooses ``action`` from this very list)
+                pass it in to skip re-deriving it twice more (once in
+                ``is_legal``, once in the legality recompute that shadows it).
+                Must be exactly ``legal_actions(seat)`` or behavior changes.
 
         Returns:
             The :class:`ActionOutcome` describing what happened.
@@ -147,7 +155,12 @@ class HokmEngine:
             seat = self.current_seat()
         elif seat != self.current_seat():
             raise ValueError(f"seat {seat} cannot act; it is seat {self.current_seat()}'s turn")
-        if not self.is_legal(action, seat):
+        if _legal is not None:
+            if action not in _legal:
+                raise ValueError(
+                    f"illegal action {action} for seat {seat} in phase {self.state.hands.phase.name}"
+                )
+        elif not self.is_legal(action, seat):
             raise ValueError(
                 f"illegal action {action} for seat {seat} in phase {self.state.hands.phase.name}"
             )

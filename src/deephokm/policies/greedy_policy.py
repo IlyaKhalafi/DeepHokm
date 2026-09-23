@@ -17,20 +17,10 @@ from collections.abc import Callable
 
 import numpy as np
 
-from deephokm.cards import NUM_RANKS, NUM_SUITS
+from deephokm.cards import NUM_RANKS, NUM_SUITS, RANK_OF, SUIT_OF
 from deephokm.env.spaces import Observation
 from deephokm.rules.legality import TRUMP_ACTION_OFFSET
 from deephokm.rules.state import NUM_SEATS
-
-
-def _suit_of(card: int) -> int:
-    """Return the suit id of a card id."""
-    return card // NUM_RANKS
-
-
-def _rank_of(card: int) -> int:
-    """Return the rank index (0 = two, 12 = ace) of a card id."""
-    return card % NUM_RANKS
 
 
 class GreedyPolicy:
@@ -64,7 +54,7 @@ class GreedyPolicy:
         strength = [0.0] * NUM_SUITS
         for card in hand:
             # Length dominates; the rank term only separates equal lengths.
-            strength[_suit_of(int(card))] += 1.0 + _rank_of(int(card)) / (2 * NUM_RANKS)
+            strength[SUIT_OF[int(card)]] += 1.0 + RANK_OF[int(card)] / (2 * NUM_RANKS)
         best = int(np.argmax(strength))
         return TRUMP_ACTION_OFFSET + best
 
@@ -88,14 +78,37 @@ class GreedyPolicy:
             return min(winners, key=self._discard_key(trump))
         return min(legal, key=self._discard_key(trump))
 
+    def play_from_state(
+        self,
+        trump: int | None,
+        current_trick: list[tuple[int, int]],
+        seat: int,
+        legal: list[int],
+    ) -> int:
+        """Choose a card directly from engine state, no observation built.
+
+        Identical decisions to :meth:`_play_card`: cheapest win, lowest
+        discard, highest of longest suit on lead. Simulation-only fast path
+        for rollouts that otherwise rebuild a full observation dict per play.
+        """
+        if not current_trick:
+            return self._lead(legal)
+        best_seat, best_card = self._current_best(current_trick, trump)
+        if (best_seat % 2) == (seat % 2):
+            return min(legal, key=self._discard_key(trump))
+        winners = [c for c in legal if self._beats(c, best_card, trump)]
+        if winners:
+            return min(winners, key=self._discard_key(trump))
+        return min(legal, key=self._discard_key(trump))
+
     def _lead(self, legal: list[int]) -> int:
         """Lead the highest card of the longest suit held."""
         counts = [0] * NUM_SUITS
         for card in legal:
-            counts[_suit_of(card)] += 1
+            counts[SUIT_OF[card]] += 1
         best_suit = max(range(NUM_SUITS), key=lambda s: (counts[s], s))
-        candidates = [c for c in legal if _suit_of(c) == best_suit]
-        return max(candidates, key=_rank_of)
+        candidates = [c for c in legal if SUIT_OF[c] == best_suit]
+        return max(candidates, key=lambda c: RANK_OF[c])
 
     @staticmethod
     def _current_best(played: list[tuple[int, int]], trump: int | None) -> tuple[int, int]:
@@ -119,7 +132,7 @@ class GreedyPolicy:
     @staticmethod
     def _beats(card: int, best: int, trump: int | None) -> bool:
         """Return whether ``card`` beats the trick's current best card."""
-        suit, best_suit = _suit_of(card), _suit_of(best)
+        suit, best_suit = SUIT_OF[card], SUIT_OF[best]
         is_trump = trump is not None and suit == trump
         best_is_trump = trump is not None and best_suit == trump
         if is_trump and not best_is_trump:
@@ -133,7 +146,7 @@ class GreedyPolicy:
         """Return a sort key ordering cards cheapest-first, trumps last."""
 
         def key(card: int) -> tuple[int, int]:
-            is_trump = 1 if trump is not None and _suit_of(card) == trump else 0
-            return (is_trump, _rank_of(card))
+            is_trump = 1 if trump is not None and SUIT_OF[card] == trump else 0
+            return (is_trump, RANK_OF[card])
 
         return key

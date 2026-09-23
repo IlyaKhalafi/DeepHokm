@@ -16,6 +16,11 @@ NUM_CARDS = NUM_SUITS * NUM_RANKS  # 52
 
 PAD_TOKEN = NUM_CARDS  # embedding id 52 reserved for padding
 
+# Precomputed card-id -> component tables for hot paths that would
+# otherwise re-divide/modulo on every card (rollout loops, etc.).
+SUIT_OF = tuple(card // NUM_RANKS for card in range(NUM_CARDS))
+RANK_OF = tuple(card % NUM_RANKS for card in range(NUM_CARDS))
+
 
 class Suit(IntEnum):
     """The four suits, ordered clubs, diamonds, hearts, spades (ids 0-3)."""
