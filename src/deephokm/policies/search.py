@@ -313,7 +313,10 @@ def sample_determinized_hands(
 
 
 def _clone_for_simulation(
-    engine: HokmEngine, visible_seat: int, sampled_hands: list[list[int]]
+    engine: HokmEngine,
+    visible_seat: int,
+    sampled_hands: list[list[int]],
+    rng: random.Random | None = None,
 ) -> HokmEngine:
     """Return a fresh, independent engine for simulating from a determinized world.
 
@@ -332,6 +335,9 @@ def _clone_for_simulation(
         visible_seat: The one seat whose real hand may be copied.
         sampled_hands: A length-``NUM_SEATS`` determinized hand assignment;
             only the entries for seats other than ``visible_seat`` are used.
+        rng: RNG for the clone (consumed only if a simulated hand re-deals);
+            pass a hoisted shared instance in rollout loops to avoid paying
+            for a fresh, never-seeded :class:`random.Random` per clone.
     """
     hands = engine.state.hands
     cloned_hands = HandState(
@@ -357,7 +363,7 @@ def _clone_for_simulation(
         hand_number=engine.state.hand_number,
         winner=None,
     )
-    return HokmEngine(rng=random.Random(), state=cloned_state)
+    return HokmEngine(rng=rng if rng is not None else random.Random(), state=cloned_state)
 
 
 @dataclass
@@ -487,6 +493,10 @@ class IIMCSearchPolicy:
         unseen_pool = [c for c in range(NUM_CARDS) if c not in seen]
         remaining_sizes = [len(hands.hands[s]) for s in range(NUM_SEATS)]
 
+        # One hoisted clone RNG per decision (fresh, unseeded -- as the
+        # per-clone RNGs used to be; a clone only consumes its RNG via a
+        # simulated hand's redeal, into state the caller discards).
+        clone_rng = random.Random()
         scores = dict.fromkeys(candidates, 0.0)
         for _ in range(self.n_samples):
             sampled_hands = sample_determinized_hands(
@@ -498,7 +508,7 @@ class IIMCSearchPolicy:
                 rng=self._rng,
             )
             for action in candidates:
-                sim_engine = _clone_for_simulation(engine, root_seat, sampled_hands)
+                sim_engine = _clone_for_simulation(engine, root_seat, sampled_hands, rng=clone_rng)
                 outcome: ActionOutcome = sim_engine.apply_action(action, seat=root_seat)
                 if outcome.hand_complete:
                     assert outcome.hand_winner_team is not None

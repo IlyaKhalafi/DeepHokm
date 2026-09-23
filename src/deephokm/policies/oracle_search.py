@@ -40,9 +40,9 @@ automatic redeal -- callers must start from a state already in
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 
-from deephokm.env.spaces import mask_for, observation_for
 from deephokm.policies.counterfactual_search import (
     MAX_ROLLOUT_PLIES_DEFAULT,
     rollout_to_hand_end,
@@ -50,7 +50,7 @@ from deephokm.policies.counterfactual_search import (
 from deephokm.policies.greedy_policy import GreedyPolicy
 from deephokm.policies.search import _clone_for_simulation
 from deephokm.rules.engine import HokmEngine
-from deephokm.rules.state import HandState, Phase
+from deephokm.rules.state import NUM_SEATS, HandState, Phase
 
 DEPTH_DEFAULT = 2
 
@@ -91,12 +91,18 @@ class _SearchContext:
     root_team: int
     greedy: GreedyPolicy
     max_rollout_plies: int
+    # One hoisted RNG for the whole search: clones only consume it when a
+    # simulated hand re-deals, and a fresh, never-seeded random.Random per
+    # clone costs more than it does here.
+    rng: random.Random
 
 
-def _greedy_action(
-    hands: HandState, seat: int, game_points: list[int], legal: list[int], ctx: _SearchContext
-) -> int:
-    return ctx.greedy.act(observation_for(hands, seat, game_points), mask_for(legal))
+def _greedy_action(hands: HandState, seat: int, legal: list[int], ctx: _SearchContext) -> int:
+    # play_from_state is the same decision act() makes from the equivalent
+    # observation (cheapest win, lowest discard, lead), minus the numpy
+    # observation build; a non-empty hand always has a legal card action, so
+    # no mask is needed.
+    return ctx.greedy.play_from_state(hands.trump, hands.current_trick, seat, legal)
 
 
 def _step(
@@ -105,7 +111,7 @@ def _step(
     """Clone ``engine`` (every seat's *real* hand, not a determinization),
     apply ``action``, and report a terminal outcome if the hand just ended.
     """
-    clone = _clone_for_simulation(engine, seat, engine.state.hands.hands)
+    clone = _clone_for_simulation(engine, seat, engine.state.hands.hands, rng=ctx.rng)
     outcome = clone.apply_action(action, seat=seat)
     if outcome.hand_complete:
         assert outcome.hand_winner_team is not None
@@ -126,7 +132,13 @@ def _oracle_value(engine: HokmEngine, remaining_depth: int, ctx: _SearchContext)
     determinization).
     """
     hands = engine.state.hands
-    seat = engine.current_seat()
+    # Always CARD_PLAY here (callers assert it; a card play can only exit it
+    # via a completed hand, which returns before recursing). Inline the same
+    # next-seat rule engine.current_seat() applies in CARD_PLAY.
+    if hands.current_trick:
+        seat = (hands.current_trick[-1][0] + 1) % NUM_SEATS
+    else:
+        seat = hands.leader
     legal = engine.legal_actions(seat)
     controlled = seat in ctx.controlled_seats
 
@@ -145,12 +157,10 @@ def _oracle_value(engine: HokmEngine, remaining_depth: int, ctx: _SearchContext)
         return best
 
     if controlled and remaining_depth <= 0 and len(legal) > 1:
-        clone = _clone_for_simulation(engine, seat, hands.hands)
+        clone = _clone_for_simulation(engine, seat, hands.hands, rng=ctx.rng)
         return rollout_to_hand_end(clone, ctx.root_team, ctx.greedy, ctx.max_rollout_plies)
 
-    action = legal[0] if len(legal) == 1 else _greedy_action(
-        hands, seat, engine.state.game_points, legal, ctx
-    )
+    action = legal[0] if len(legal) == 1 else _greedy_action(hands, seat, legal, ctx)
     outcome, child = _step(engine, seat, action, ctx)
     if outcome is not None:
         return outcome
@@ -164,6 +174,7 @@ def oracle_ceiling(
     *,
     depth: int = DEPTH_DEFAULT,
     max_rollout_plies: int = MAX_ROLLOUT_PLIES_DEFAULT,
+    rng: random.Random | None = None,
 ) -> float:
     """The exact best achievable outcome for ``controlled_team`` from ``engine``.
 
@@ -173,6 +184,9 @@ def oracle_ceiling(
         depth: How many of the controlled team's own future decisions to
             branch over before falling back to a GreedyPolicy rollout.
         max_rollout_plies: Forwarded to the post-depth rollout.
+        rng: Shared RNG for the simulated clones (only consumed by a
+            simulated hand's redeal, which callers discard); pass a
+            hoisted instance when calling this repeatedly in one loop.
 
     Returns:
         +1.0 if the controlled team can force a win within ``depth`` plies
@@ -191,6 +205,9 @@ def oracle_ceiling(
         root_team=controlled_team,
         greedy=GreedyPolicy(),
         max_rollout_plies=max_rollout_plies,
+        # Hoisted: one clone RNG per search call instead of one fresh,
+        # never-seeded random.Random per cloned engine.
+        rng=rng if rng is not None else random.Random(),
     )
     return _oracle_value(engine, depth, ctx)
 
@@ -201,6 +218,7 @@ def oracle_best_action(
     *,
     depth: int = DEPTH_DEFAULT,
     max_rollout_plies: int = MAX_ROLLOUT_PLIES_DEFAULT,
+    rng: random.Random | None = None,
 ) -> int:
     """The action achieving :func:`oracle_ceiling`'s value at the ROOT decision.
 
@@ -218,6 +236,8 @@ def oracle_best_action(
         controlled_team: 0 (seats 0, 2) or 1 (seats 1, 3).
         depth: Forwarded to the underlying search.
         max_rollout_plies: Forwarded to the underlying search.
+        rng: Shared RNG for the simulated clones (see
+            :func:`oracle_ceiling`).
 
     Returns:
         A legal action id for the engine's current seat.
@@ -241,6 +261,9 @@ def oracle_best_action(
         root_team=controlled_team,
         greedy=GreedyPolicy(),
         max_rollout_plies=max_rollout_plies,
+        # Hoisted: one clone RNG per search call instead of one fresh,
+        # never-seeded random.Random per cloned engine.
+        rng=rng if rng is not None else random.Random(),
     )
     best_action, best_value = legal[0], -2.0
     for action in legal:

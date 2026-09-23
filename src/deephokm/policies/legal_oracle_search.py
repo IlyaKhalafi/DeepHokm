@@ -110,8 +110,15 @@ class LegalOracleSearchPolicy:
         )
         determinized = _clone_for_simulation(engine, root_seat, sampled_hands)
         team = team_of(root_seat)
+        # Hoisted clone RNG for the depth search's own subtree of clones
+        # (one fresh, unseeded instance -- as the per-clone RNGs used to be
+        # -- shared across the whole decision instead).
         return oracle_best_action(
-            determinized, team, depth=self.depth, max_rollout_plies=self.max_rollout_plies
+            determinized,
+            team,
+            depth=self.depth,
+            max_rollout_plies=self.max_rollout_plies,
+            rng=random.Random(),
         )
 
 

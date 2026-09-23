@@ -183,13 +183,17 @@ class HybridQSearchPolicy:
         seen = set(hands.played) | set(own_hand)
         unseen = [c for c in range(NUM_CARDS) if c not in seen]
         sizes = [len(hands.hands[s]) for s in range(4)]
+        # One hoisted clone RNG per decision (fresh, unseeded -- as the
+        # per-clone RNGs used to be; clones only consume it via a simulated
+        # hand's redeal, into discarded state).
+        clone_rng = random.Random()
         wins_nominated = wins_greedy = 0
         for _ in range(self.verify_k):
             samp = sample_determinized_hands(
                 root_seat, own_hand, unseen, sizes, voids=self.voids.voids, rng=self._rng
             )
-            n_val = self._rollout_value(engine, root_seat, nominated, team, samp)
-            g_val = self._rollout_value(engine, root_seat, greedy_action, team, samp)
+            n_val = self._rollout_value(engine, root_seat, nominated, team, samp, clone_rng)
+            g_val = self._rollout_value(engine, root_seat, greedy_action, team, samp, clone_rng)
             if n_val > g_val:
                 wins_nominated += 1
             elif g_val > n_val:
@@ -204,9 +208,10 @@ class HybridQSearchPolicy:
         action: int,
         team: int,
         sampled_hands: list[list[int]],
+        clone_rng: random.Random,
     ) -> float:
         """One sampled world's outcome for ``action`` (depth-1 continuation)."""
-        clone = _clone_for_simulation(engine, seat, sampled_hands)
+        clone = _clone_for_simulation(engine, seat, sampled_hands, rng=clone_rng)
         outcome = clone.apply_action(action, seat=seat)
         if outcome.hand_complete:
             assert outcome.hand_winner_team is not None
@@ -216,4 +221,4 @@ class HybridQSearchPolicy:
         # same evaluation the legal depth search's score function uses.
         from deephokm.policies.oracle_search import oracle_ceiling
 
-        return oracle_ceiling(clone, team, depth=1)
+        return oracle_ceiling(clone, team, depth=1, rng=clone_rng)

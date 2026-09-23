@@ -94,8 +94,12 @@ def rollout_to_hand_end(
     "GreedyPolicy from here to hand end" continuation.
     """
     for _ in range(max_plies):
-        seat = engine.current_seat()
         hands = engine.state.hands
+        # CARD_PLAY only (both call sites enter right after a card play in a
+        # non-completed hand), so the acting seat is the current trick's
+        # follower, or the trick's leader when it is empty -- inlined rather
+        # than a current_seat() call per ply.
+        seat = (hands.current_trick[-1][0] + 1) % NUM_SEATS if hands.current_trick else hands.leader
         legal = engine.legal_actions(seat)
         action = greedy.play_from_state(hands.trump, hands.current_trick, seat, legal)
         outcome = engine.apply_action(action, seat=seat, _legal=legal)

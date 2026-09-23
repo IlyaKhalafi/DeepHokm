@@ -142,11 +142,12 @@ class GreedyPolicy:
         return False
 
     @staticmethod
-    def _discard_key(trump: int | None) -> Callable[[int], tuple[int, int]]:
+    def _discard_key(trump: int | None) -> Callable[[int], tuple[int, int, int]]:
         """Return a sort key ordering cards cheapest-first, trumps last."""
 
-        def key(card: int) -> tuple[int, int]:
+        def key(card: int) -> tuple[int, int, int]:
             is_trump = 1 if trump is not None and SUIT_OF[card] == trump else 0
-            return (is_trump, RANK_OF[card])
+            # The card id breaks same-rank ties deterministically.
+            return (is_trump, RANK_OF[card], card)
 
         return key

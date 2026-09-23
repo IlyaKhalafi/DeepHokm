@@ -118,14 +118,20 @@ class LegalDepthSearchPolicy:
         self.voids.observe(seat, card, led_suit)
 
     def _score_action(
-        self, engine: HokmEngine, seat: int, action: int, team: int, sampled_hands: list[list[int]]
+        self,
+        engine: HokmEngine,
+        seat: int,
+        action: int,
+        team: int,
+        sampled_hands: list[list[int]],
+        clone_rng: random.Random,
     ) -> float:
         """Score ``action`` in one sampled world via its own depth-(D-1)
         single-guess continuation (not a plain GreedyPolicy rollout, unlike
         ``CounterfactualSearchPolicy`` -- this is what adds real multi-ply
         lookahead within each sample).
         """
-        clone = _clone_for_simulation(engine, seat, sampled_hands)
+        clone = _clone_for_simulation(engine, seat, sampled_hands, rng=clone_rng)
         outcome = clone.apply_action(action, seat=seat)
         if outcome.hand_complete:
             assert outcome.hand_winner_team is not None
@@ -135,7 +141,11 @@ class LegalDepthSearchPolicy:
         # way to leave it is `outcome.hand_complete`, already handled above.
         assert clone.state.hands.phase is Phase.CARD_PLAY
         return oracle_ceiling(
-            clone, team, depth=self.search_depth - 1, max_rollout_plies=self.max_rollout_plies
+            clone,
+            team,
+            depth=self.search_depth - 1,
+            max_rollout_plies=self.max_rollout_plies,
+            rng=clone_rng,
         )
 
     def decide(self, engine: HokmEngine) -> int:
@@ -160,6 +170,13 @@ class LegalDepthSearchPolicy:
         team = team_of(root_seat)
         obs = observation_for(hands, root_seat, game_points)
         greedy_action = self.greedy.act(obs, mask_for(legal))
+        # One hoisted clone RNG per decision: the clones only ever consume
+        # it via a simulated hand's redeal, into state that is discarded
+        # the instant the hand completes, so a single shared (fresh,
+        # unseeded -- as the per-clone RNGs used to be) instance per
+        # decide() is behaviorally identical and skips one construction
+        # per simulated clone.
+        clone_rng = random.Random()
 
         own_hand = hands.hands[root_seat]
         seen = set(hands.played) | set(own_hand)
@@ -184,7 +201,7 @@ class LegalDepthSearchPolicy:
             sampled_hands = sample_world()
             for action in legal:
                 select_totals[action] += self._score_action(
-                    engine, root_seat, action, team, sampled_hands
+                    engine, root_seat, action, team, sampled_hands, clone_rng
                 )
         best_action = max(legal, key=lambda a: select_totals[a])
 
@@ -199,8 +216,8 @@ class LegalDepthSearchPolicy:
         wins = losses = 0
         for _ in range(n_eval):
             sampled_hands = sample_world()
-            b = self._score_action(engine, root_seat, best_action, team, sampled_hands)
-            g = self._score_action(engine, root_seat, greedy_action, team, sampled_hands)
+            b = self._score_action(engine, root_seat, best_action, team, sampled_hands, clone_rng)
+            g = self._score_action(engine, root_seat, greedy_action, team, sampled_hands, clone_rng)
             if b > g:
                 wins += 1
             elif g > b:

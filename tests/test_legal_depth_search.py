@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import random
 
 import pytest
 
@@ -206,7 +207,7 @@ def test_decide_switches_when_the_score_clearly_favors_a_challenger(monkeypatch)
     greedy_action = GreedyPolicy().act(obs, mask_for(legal))
     challenger = next(a for a in legal if a != greedy_action)
 
-    def fake_score(self, engine, seat, action, team, sampled_hands):  # noqa: PLR0917
+    def fake_score(self, engine, seat, action, team, sampled_hands, clone_rng):  # noqa: PLR0917
         return 1.0 if action == challenger else -1.0
 
     monkeypatch.setattr(LegalDepthSearchPolicy, "_score_action", fake_score)
@@ -231,7 +232,7 @@ def test_score_action_uses_search_depth_minus_one_on_the_post_action_state(monke
 
     captured = {}
 
-    def fake_oracle_ceiling(clone, controlled_team, *, depth, max_rollout_plies):
+    def fake_oracle_ceiling(clone, controlled_team, *, depth, max_rollout_plies, rng):
         captured["controlled_team"] = controlled_team
         captured["depth"] = depth
         captured["acting_seat"] = clone.current_seat()
@@ -241,7 +242,7 @@ def test_score_action_uses_search_depth_minus_one_on_the_post_action_state(monke
     monkeypatch.setattr(legal_depth_search, "oracle_ceiling", fake_oracle_ceiling)
 
     sampled_hands = [list(h) for h in engine.state.hands.hands]
-    search._score_action(engine, seat, action, team, sampled_hands)
+    search._score_action(engine, seat, action, team, sampled_hands, random.Random())
 
     assert captured["depth"] == search.search_depth - 1
     assert captured["controlled_team"] == team
