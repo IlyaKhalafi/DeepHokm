@@ -247,8 +247,19 @@ against greedy) established the shape of the verify-K trade:
 | verify-K | matches | win rate | 95% CI | pure search at same K | lift |
 |---|---|---|---|---|---|
 | 48 | 122 | 0.713 | [0.633, 0.793] | 0.570 | +0.143 |
-| 192 | 140 | 0.814 | [0.750, 0.879] | 0.730 | +0.084 |
-| 384 | 42 | 0.833 | [0.721, 0.946] | 0.790 | +0.043 |
+| 192 | 200 | 0.790 | [0.734, 0.846] | 0.730 | +0.060 |
+| 384 | 73 | 0.836 | [0.751, 0.921] | 0.790 | +0.046 |
+
+The K=192 figure is worth reading twice: it stood at 0.814 after 140 matches
+and settled at 0.790 over 200. Early partials of a noisy binary outcome drift
+toward the mean, which is the concrete reason a point estimate crossing the
+target mid-run is not a result.
+
+The lift over pure search also decays as K grows: +0.143, +0.060, +0.046. Most
+of a high-K hybrid's win rate is the search, not the network. The network's
+value is the decaying lift plus a 26 ms nomination that removes most
+candidates from consideration -- real, but it should not be described as the
+network playing at the reported level.
 
 These are exploratory, and reporting the best of several configurations as if
 it were a single test would overstate the result. Note also the power question: at a
