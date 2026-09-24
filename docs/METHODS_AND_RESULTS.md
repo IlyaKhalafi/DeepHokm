@@ -327,3 +327,43 @@ hidden; both results are reported regardless of outcome.
 - success: the lower bound of the 95% interval exceeds 0.80
 - expected: the K=384 exploratory rate was 0.838 over 117 matches, which at
   n=600 would give a lower bound near 0.809
+
+## 12. Held-out seeds contradict the tuning seeds
+
+The second registered confirmation, run through the shipped policy on seeds
+disjoint from all tuning, does not reproduce the exploratory figure:
+
+| config | seeds | matches | win rate | 95% CI | lift vs pure search |
+|---|---|---|---|---|---|
+| K=384 exploratory | 41,000,000 (tuning) | 118 | 0.839 | [0.773, 0.905] | +0.049 |
+| K=384 registered | 91,000,000 (held out) | 185 | 0.768 | [0.707, 0.828] | -0.022 |
+
+A 7pp gap at an identical configuration. K=384 was chosen because it scored
+best among four verify-K settings measured on the tuning seeds, and part of
+"best" was seed luck: selecting the maximum over several noisy estimates
+returns an estimate biased upward. On held-out seeds the hybrid at K=384 does
+not beat pure search at the same K, let alone clear 0.80.
+
+Two earlier readings point the same way, and are recorded because each was a
+number that looked like success at the time:
+
+- K=192 read 0.814 at 140 matches and settled at 0.790 at 200.
+- K=384 read 0.839 on tuning seeds and 0.768 on held-out seeds.
+
+**The 80% target is not met.** The exploratory numbers that appeared to reach
+it were artifacts of selection and of small samples.
+
+A paired diagnostic is in flight to separate the two possible causes: the
+shipped policy is being run on the *tuning* seeds, so that if it reproduces
+0.839 the research harness and the production module agree and the gap is
+purely statistical, whereas a materially lower figure would indicate a defect
+in the shipped path that has to be fixed before any number is trusted.
+
+### What the evidence says to do next
+
+The network's lift over pure search is small and decays with search strength
+(+0.143, +0.060, +0.049, then negative). Tuning verify-K further cannot fix
+that; the nomination itself has to get better, which means better labels. The
+K=192 teacher wins 0.730 of its own matches, so a student distilled from it
+cannot be expected to carry a hybrid past 0.80 on its own -- the K=3072 teacher
+(0.852) is the one whose decisions are worth imitating.
