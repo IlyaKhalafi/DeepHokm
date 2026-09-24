@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
+from typing import overload
 
 from deephokm.rules import dealing, legality, scoring, tricks
 from deephokm.rules.state import (
@@ -126,9 +127,32 @@ class HokmEngine:
             seat = self.current_seat()
         return action in self.legal_actions(seat)
 
+    def _validate_turn(self, seat: int | None) -> int:
+        """Resolve the acting seat (defaulting to current) and check it is its turn."""
+        if seat is None:
+            return self.current_seat()
+        current = self.current_seat()
+        if seat != current:
+            raise ValueError(f"seat {seat} cannot act; it is seat {current}'s turn")
+        return seat
+
+    def _illegal_message(self, action: int, seat: int | None) -> str:
+        """Build the ``ValueError`` text for an illegal action."""
+        return f"illegal action {action} for seat {seat} in phase {self.state.hands.phase.name}"
+
+    @overload
+    def apply_action(self, action: int, seat: int, _legal: list[int]) -> ActionOutcome | None:
+        """Fast path: the ``None`` mid-trick return is only possible here."""
+
+    @overload
+    def apply_action(
+        self, action: int, seat: int | None = None, _legal: None = None
+    ) -> ActionOutcome:
+        """Normal path: never returns ``None``."""
+
     def apply_action(
         self, action: int, seat: int | None = None, _legal: list[int] | None = None
-    ) -> ActionOutcome:
+    ) -> ActionOutcome | None:
         """Apply an action and return the resulting transition.
 
         Args:
@@ -141,9 +165,17 @@ class HokmEngine:
                 pass it in to skip re-deriving it twice more (once in
                 ``is_legal``, once in the legality recompute that shadows it).
                 Must be exactly ``legal_actions(seat)`` or behavior changes.
+                Callers on this path must also guarantee it is ``seat``'s
+                turn (the rollout loop derives the acting seat from the live
+                trick, so the seat-equality re-check here would only call
+                ``current_seat()`` again) and must treat a ``None`` return
+                as a plain mid-trick, non-terminal play.
 
         Returns:
-            The :class:`ActionOutcome` describing what happened.
+            The :class:`ActionOutcome` describing what happened, or
+            ``None`` on the ``_legal`` fast path when the play is a
+            mid-trick, non-terminal step (no trick completed, no hand or
+            match consequences to report).
 
         Raises:
             ValueError: If the action is illegal for the acting seat.
@@ -151,19 +183,15 @@ class HokmEngine:
         """
         if self.state.winner is not None:
             raise RuntimeError("match is over; call start_match() to start a new one")
-        if seat is None:
-            seat = self.current_seat()
-        elif seat != self.current_seat():
-            raise ValueError(f"seat {seat} cannot act; it is seat {self.current_seat()}'s turn")
         if _legal is not None:
+            # Fast-path contract: the caller passes the acting seat itself.
+            assert seat is not None
             if action not in _legal:
-                raise ValueError(
-                    f"illegal action {action} for seat {seat} in phase {self.state.hands.phase.name}"
-                )
-        elif not self.is_legal(action, seat):
-            raise ValueError(
-                f"illegal action {action} for seat {seat} in phase {self.state.hands.phase.name}"
-            )
+                raise ValueError(self._illegal_message(action, seat))
+        else:
+            seat = self._validate_turn(seat)
+            if not self.is_legal(action, seat):
+                raise ValueError(self._illegal_message(action, seat))
 
         hands = self.state.hands
         if legality.is_trump_action(action):
@@ -184,6 +212,10 @@ class HokmEngine:
         hands.played_by.append(seat)
 
         if len(hands.current_trick) < NUM_SEATS:
+            # Mid-trick, non-terminal: the fast-path caller only needs to
+            # know whether the hand completed, so skip the dataclass build.
+            if _legal is not None:
+                return None
             return ActionOutcome(seat=seat, action=action, card=card)
 
         winner = tricks.resolve_trick(hands.current_trick, hands.trump)

@@ -13,8 +13,6 @@ seeing hidden hands.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
 import numpy as np
 
 from deephokm.cards import NUM_RANKS, NUM_SUITS, RANK_OF, SUIT_OF
@@ -72,11 +70,11 @@ class GreedyPolicy:
         best_seat, best_card = self._current_best(played, trump)
         if (best_seat % 2) == (seat % 2):
             # The partner is winning: keep high cards, throw the lowest.
-            return min(legal, key=self._discard_key(trump))
+            return self._cheapest(legal, trump)
         winners = [c for c in legal if self._beats(c, best_card, trump)]
         if winners:
-            return min(winners, key=self._discard_key(trump))
-        return min(legal, key=self._discard_key(trump))
+            return self._cheapest(winners, trump)
+        return self._cheapest(legal, trump)
 
     def play_from_state(
         self,
@@ -95,11 +93,11 @@ class GreedyPolicy:
             return self._lead(legal)
         best_seat, best_card = self._current_best(current_trick, trump)
         if (best_seat % 2) == (seat % 2):
-            return min(legal, key=self._discard_key(trump))
+            return self._cheapest(legal, trump)
         winners = [c for c in legal if self._beats(c, best_card, trump)]
         if winners:
-            return min(winners, key=self._discard_key(trump))
-        return min(legal, key=self._discard_key(trump))
+            return self._cheapest(winners, trump)
+        return self._cheapest(legal, trump)
 
     def _lead(self, legal: list[int]) -> int:
         """Lead the highest card of the longest suit held."""
@@ -116,15 +114,24 @@ class GreedyPolicy:
 
         ``played`` is in seat order, which is not play order, so the led suit
         is taken from the seat that led — the played seat whose predecessor
-        has not played.
+        has not played. ``played`` has at most 4 entries, so both the leader
+        check and the play-order walk are plain loops; no set or sort.
         """
-        seats = {s for s, _ in played}
-        leader = next(s for s, _ in played if (s - 1) % NUM_SEATS not in seats)
-        order = [
-            (s, card) for s, card in sorted(played, key=lambda sc: (sc[0] - leader) % NUM_SEATS)
-        ]
-        best_seat, best_card = order[0]
-        for s, card in order[1:]:
+        leader = played[0][0]
+        for s, _ in played:
+            is_leader = True
+            for s2, _ in played:
+                if s2 == (s - 1) % NUM_SEATS:
+                    is_leader = False
+                    break
+            if is_leader:
+                leader = s
+                break
+        by_seat = dict(played)
+        best_seat, best_card = leader, by_seat[leader]
+        for step in range(1, len(played)):
+            s = (leader + step) % NUM_SEATS
+            card = by_seat[s]
             if GreedyPolicy._beats(card, best_card, trump):
                 best_seat, best_card = s, card
         return best_seat, best_card
@@ -142,12 +149,14 @@ class GreedyPolicy:
         return False
 
     @staticmethod
-    def _discard_key(trump: int | None) -> Callable[[int], tuple[int, int, int]]:
-        """Return a sort key ordering cards cheapest-first, trumps last."""
+    def _cheapest(legal: list[int], trump: int | None) -> int:
+        """Return the cheapest card in ``legal``: lowest rank first, trumps last.
 
-        def key(card: int) -> tuple[int, int, int]:
-            is_trump = 1 if trump is not None and SUIT_OF[card] == trump else 0
-            # The card id breaks same-rank ties deterministically.
-            return (is_trump, RANK_OF[card], card)
-
-        return key
+        The (is_trump, rank, card) key list is built once per call and min'd,
+        the same total order the old per-element key imposed (the card id
+        breaks same-rank ties deterministically).
+        """
+        keys = [
+            (1 if trump is not None and SUIT_OF[c] == trump else 0, RANK_OF[c], c) for c in legal
+        ]
+        return min(keys)[2]

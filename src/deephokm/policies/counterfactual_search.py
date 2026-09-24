@@ -103,7 +103,8 @@ def rollout_to_hand_end(
         legal = engine.legal_actions(seat)
         action = greedy.play_from_state(hands.trump, hands.current_trick, seat, legal)
         outcome = engine.apply_action(action, seat=seat, _legal=legal)
-        if outcome.hand_complete:
+        # None: mid-trick, non-terminal play on the _legal fast path.
+        if outcome is not None and outcome.hand_complete:
             assert outcome.hand_winner_team is not None
             return 1.0 if outcome.hand_winner_team == root_team else -1.0
     raise RuntimeError(f"rollout exceeded {max_plies} plies without completing the hand")
