@@ -129,3 +129,112 @@ K through at least K=768.
    stable at these K, unlike the K=48 teacher whose flips were seed
    noise).
 4. Speed: Cython/native backend for the engine and sampler hot paths.
+
+## 6. Label quality: what teacher agreement actually measures
+
+Sections 3 and 5 treated agreement with the search teacher as a measure of
+student quality. It is not one, and measuring it properly changed every
+conclusion that followed.
+
+On the K=192 label set (30,836 decisions, ~5 legal actions per decision):
+
+| quantity | value |
+|---|---|
+| random-legal baseline | 0.284 |
+| decisions whose top action is an exact tie | 0.602 |
+| decisions where *every* legal action is optimal | 0.318 |
+| median Q-gap between best and second-best | 0.0000 |
+
+So a reported 0.35 argmax agreement sits 7pp above guessing, and most of the
+metric grades which of several equal-valued cards the teacher happened to list
+first. Stratifying by the teacher's own Q-gap makes this explicit: the three
+tied quintiles score 0.22 against a 0.19 random floor, while the decisive
+quintile scores 0.575 against 0.431. The model does real work exactly where
+the label carries information.
+
+Two further diagnostics settled the direction of the project:
+
+- **Train tracked val** (0.3677 vs 0.3601) for an 8M-parameter model on 23.5k
+  examples. A model that cannot fit its own training set is not overfitting;
+  the labels contain contradictions.
+- **The teacher disagrees with itself.** Replaying the same deals and
+  recomputing each decision with independent determinization streams gives
+  0.6971 argmax and 0.7407 optimal-set agreement on decisive decisions. That
+  is a hard ceiling on any student. Trivially-agreeing all-tied decisions are
+  excluded: identical Q arrays make argmax agree for free, which inflates the
+  figure to 0.7734.
+
+The measured ceiling of 0.7407 refuted the prior expectation of a ~0.40
+label-noise wall, which would have closed this line of work. There was 27pp of
+real headroom.
+
+## 7. Fixing the objective, not the architecture
+
+Six architectures were compared at 20 epochs and landed within a 0.28-0.38
+band -- a structure-free MLP matched the 8M transformer, and a 377k
+suit-equivariant CNN came within 2.5pp at 21x fewer parameters. That flatness
+was the finding: the backbone was not the binding constraint. (Two process
+errors are worth recording: the 20-epoch horizon was far short of convergence,
+since val accuracy was still climbing at epoch 75, and single-seed differences
+of 1-2pp were read as rankings when the epoch-to-epoch swing within one arm was
+just as large.)
+
+Three changes to the objective, each forced by a measurement above:
+
+1. Drop the 31.8% of decisions where every action is optimal. No decision
+   exists there; they contribute only gradient noise.
+2. Replace MSE on raw Q with cross-entropy against `softmax(Q/tau)`, tau at
+   the teacher's sampling error (`1/sqrt(K)` ~= 0.07 at K=192). Near-ties then
+   produce a near-uniform target that says "equivalent" instead of forcing a
+   fit to a coin flip. The diagnostic that pointed here: train MSE reached
+   0.0036 while train argmax stayed at 0.46, so the Q surface was already fit
+   and the decisive error lived below the MSE scale.
+3. Score against the teacher's optimal set rather than its tie-break.
+
+| model | params | optimal-set accuracy | % of the 0.7407 ceiling |
+|---|---|---|---|
+| Transformer, MSE on raw Q | 8.0M | 0.4684 | 63% |
+| MLP, soft targets | 2.9M | 0.5888 | 79% |
+| RankCNN, soft targets | 377k | 0.6150 | 83% |
+| **RankCNN 3x, soft targets** | 6.4M | **0.6461** | **87%** |
+
+The architecture question then became meaningful again: with the loss fixed,
+rank-axis convolution with symmetric cross-suit pooling beat both the MLP and
+convolution across suits (which asserts an adjacency the rules lack).
+
+## 8. Suit symmetry: what it is worth
+
+Hokm is invariant under relabelling the non-trump suits. Two ways to exploit
+that were tested.
+
+Collapsing card identity to rank plus a trump flag *lost* accuracy
+(0.3489 -> 0.3209 on the transformer): it destroys not just the suits' names
+but the partition they induce, so the network can no longer tell whether a
+card in hand shares a suit with the led card -- which is what follow-suit and
+void reasoning are built on. Restoring the partition with a canonical suit slot
+recovered most of the gap (0.3366) but not all of it, and cost 1.2pp against
+simply keeping the 52-card table for a 0.12% parameter saving. The factorized
+encoding was abandoned.
+
+Weight sharing across suit rows in a convolution is the version that pays: it
+is exactly equivariant by construction (verified numerically), needs no
+canonicalization, and preserves the partition because each suit keeps its own
+row.
+
+## 9. Deployment: numpy inference
+
+Playing requires no PyTorch. `deephokm.nn.numpy_qnet` mirrors the trained
+network in numpy, and torch is needed only to train and to convert weights.
+
+| gate | budget | measured (6.4M-parameter shipped model) |
+|---|---|---|
+| latency per decision | 1000 ms | 26.3 ms |
+| numpy vs torch values | -- | 1.3e-06 max absolute difference |
+| numpy vs torch decisions | identical | 100% argmax agreement |
+| weight roundtrip | identical | bit-identical |
+
+Two silent failure modes are gated by tests: a port that drifts from the
+trained weights would change how the model plays without raising an error, and
+the feature builder used at play time must match the one used in training
+exactly or the network sees a different input distribution than it trained on
+(verified at 0.0 difference over real states).
