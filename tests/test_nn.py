@@ -11,6 +11,7 @@ import torch as th
 from gymnasium import spaces
 
 import deephokm.nn.extractor as extractor_mod
+from deephokm.cards import NUM_RANKS
 from deephokm.env import HokmEnv
 from deephokm.env.spaces import empty_observation, observation_space
 from deephokm.nn.extractor import HokmTransformerExtractor
@@ -26,7 +27,9 @@ from deephokm.nn.tokenizer import (
 from deephokm.policies.random_policy import RandomPolicy
 from deephokm.rules.state import NUM_SEATS
 
-MAX_PARAMS = 2_000_000
+# The d_model=256/6-layer model sits near 8M parameters; the cap guards
+# against accidental capacity regressions, not the reference 128-wide model.
+MAX_PARAMS = 10_000_000
 
 
 def make_env(seed: int = 0, seat: int = 0) -> HokmEnv:
@@ -69,7 +72,7 @@ def test_forward_shapes_on_padded_batch() -> None:
     ext = HokmTransformerExtractor(observation_space())
     states = gather_states(8)
     out = ext(stack(states))
-    assert out.shape == (8, 128)
+    assert out.shape == (8, ext.d_model)
     assert th.isfinite(out).all()
 
 
@@ -87,7 +90,7 @@ def test_forward_edge_case_empty_hand() -> None:
     assert obs["hand"].sum() == 0, "terminal observation should hold no cards"
     batch = {k: th.tensor(np.stack([v, v])) for k, v in obs.items()}
     out = ext(batch)
-    assert out.shape == (2, 128)
+    assert out.shape == (2, ext.d_model)
     assert th.isfinite(out).all()
 
 
@@ -97,7 +100,7 @@ def test_forward_edge_case_empty_trick() -> None:
     no_trick = [s for s in states if (s["trick_play"] < 0).all()]
     assert no_trick, "no lead state collected"
     out = ext(stack(no_trick))
-    assert out.shape == (len(no_trick), 128)
+    assert out.shape == (len(no_trick), ext.d_model)
     assert th.isfinite(out).all()
 
 
@@ -110,11 +113,11 @@ def test_forward_edge_case_pre_trump_phase() -> None:
         obs, info = env.reset(seed=random.randint(0, 10_000))
     batch = {k: th.tensor(np.stack([v, v])) for k, v in obs.items()}
     out = ext(batch)
-    assert out.shape == (2, 128)
+    assert out.shape == (2, ext.d_model)
     assert th.isfinite(out).all()
 
 
-def test_parameter_count_under_2m() -> None:
+def test_parameter_count_capped() -> None:
     ext = HokmTransformerExtractor(observation_space())
     n = sum(p.numel() for p in ext.parameters())
     print(f"extractor parameters: {n:,}")
@@ -172,7 +175,16 @@ def test_padding_invariance() -> None:
             pad = ~tokens.padding_mask
             if pad.any():
                 noise = th.randint(0, 52, tokens.tokens.shape, device=tokens.tokens.device)
-                tokens = dataclasses.replace(tokens, tokens=th.where(pad, noise, tokens.tokens))
+                noise_rank = noise % NUM_RANKS
+                shape = tokens.tokens.shape
+                dev = tokens.tokens.device
+                noise_trump = th.randint(0, 2, shape, device=dev).bool()
+                tokens = dataclasses.replace(
+                    tokens,
+                    tokens=th.where(pad, noise, tokens.tokens),
+                    ranks=th.where(pad, noise_rank, tokens.ranks),
+                    is_trump=th.where(pad, noise_trump, tokens.is_trump),
+                )
             return tokens
 
     original = extractor_mod.tokenize_tensor_batch
@@ -214,6 +226,8 @@ def test_hand_order_invariance() -> None:
             for field in (
                 "tokens",
                 "is_card",
+                "ranks",
+                "is_trump",
                 "type_ids",
                 "padding_mask",
                 "positions",
@@ -294,6 +308,26 @@ def test_trick_tokens_follow_play_order(seat: int) -> None:
     assert checked > 5, "no mid-trick states collected"
 
 
+def test_full_trick_tokenizers_agree_on_zero_tokens() -> None:
+    """A fully-played trick yields zero trick tokens in both tokenizers.
+
+    Completed tricks never appear in learner observations (the env resets the
+    trick first); both paths must agree on the synthetic input regardless.
+    """
+    obs = empty_observation()
+    obs["trick_play"] = np.array([10, 20, 30, 40])
+    obs["hand"][5] = 1
+    single = tokenize(obs)
+    assert single.tokens[0, 13:17].tolist() == [52] * 4
+    batch = {k: th.tensor(np.stack([v])) for k, v in obs.items()}
+    vectorized = tokenize_tensor_batch(batch)
+    for field in ("tokens", "is_card", "ranks", "is_trump", "type_ids",
+                  "positions", "roles", "padding_mask"):
+        assert th.equal(getattr(single, field)[0], getattr(vectorized, field)[0]), (
+            f"{field} mismatch"
+        )
+
+
 def test_trick_order_wrapping_case() -> None:
     """Direct check of the wrap-around leader case."""
     obs = empty_observation()
@@ -371,6 +405,8 @@ def test_tokenizers_agree() -> None:
         for field in (
             "tokens",
             "is_card",
+            "ranks",
+            "is_trump",
             "type_ids",
             "positions",
             "roles",
@@ -380,6 +416,58 @@ def test_tokenizers_agree() -> None:
             a = getattr(single, field)[0]
             b = getattr(vectorized, field)[i]
             assert th.equal(a, b), f"{field} mismatch at sample {i}"
+
+
+def test_suit_permutation_invariance() -> None:
+    """Swapping two non-trump suits changes nothing observable by extractor.
+
+    Cards differ only by rank + trump flag. Permuting suit labels among
+    non-trump suits leaves every rank identical and every trump flag False;
+    the only change is hand-slot order, absorbed by pooling up to float
+    rounding (same tolerance as the hand-order test). Trump suit swap would
+    flip flags, so non-trump suits only.
+    """
+    ext = HokmTransformerExtractor(observation_space())
+    ext.eval()
+    states = gather_states(12)
+    declared = [s for s in states if int(np.asarray(s["trump"]).sum()) > 0]
+    assert declared, "no post-trump states collected"
+    trump0 = int(np.asarray(declared[0]["trump"]).argmax())
+    keep = [s for s in declared if int(np.asarray(s["trump"]).argmax()) == trump0]
+    batch = stack(keep)
+
+    def swap_nontrump(obs: dict[str, th.Tensor]) -> dict[str, th.Tensor]:
+        trump = obs["trump"]
+        trump_suit = int(trump.argmax(dim=1)[0])
+        others = [s for s in range(4) if s != trump_suit]
+        a, b = others[0], others[1]
+        out = dict(obs)
+        for key in ("hand", "seen", "trick"):
+            m = obs[key].clone()
+            ca = m[:, a * 13 : (a + 1) * 13].clone()
+            m[:, a * 13 : (a + 1) * 13] = m[:, b * 13 : (b + 1) * 13]
+            m[:, b * 13 : (b + 1) * 13] = ca
+            out[key] = m
+        for key in ("trick_play", "history"):
+            m = obs[key].clone()
+            orig = obs[key]
+            is_a = (orig >= a * 13) & (orig < (a + 1) * 13)
+            is_b = (orig >= b * 13) & (orig < (b + 1) * 13)
+            m = th.where(is_a, orig + (b - a) * 13, m)
+            m = th.where(is_b, orig - (b - a) * 13, m)
+            out[key] = m
+        return out
+
+    swapped_batch = swap_nontrump(batch)
+    assert (
+        (swapped_batch["hand"] != batch["hand"]).any()
+        or (swapped_batch["trick_play"] != batch["trick_play"]).any()
+        or (swapped_batch["history"] != batch["history"]).any()
+    ), "swap was a no-op: no swapped-suit card in batch"
+    with th.no_grad():
+        base = ext(batch)
+        swapped = ext(swapped_batch)
+    assert th.allclose(base, swapped, atol=1e-5), "non-trump suit swap changed features"
 
 
 def test_policy_constructs_and_predicts() -> None:

@@ -97,7 +97,14 @@ def _load_qnet():
             seat=0, opponents=[GreedyPolicy() for _ in range(NUM_SEATS)]
         )
         net = _QNet(probe_env.observation_space)
-        net.load_state_dict(th.load(QNET_PATH, weights_only=True))
+        try:
+            net.load_state_dict(th.load(QNET_PATH, weights_only=True))
+        except RuntimeError as e:
+            # Architecture change (e.g. factored rank+trump embeddings replacing
+            # the 53-row card table) makes old checkpoints unloadable; fall back
+            # to pure search loudly instead of silently.
+            print(f"[hybrid] ignoring unloadable Q-net checkpoint: {e}", flush=True)
+            return None
         net.to("cuda").eval()
 
         @th.no_grad()

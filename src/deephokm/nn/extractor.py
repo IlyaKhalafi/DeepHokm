@@ -17,11 +17,10 @@ import torch as th
 from gymnasium import spaces
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
-from deephokm.cards import PAD_TOKEN
+from deephokm.cards import NUM_RANKS
 from deephokm.nn.tokenizer import (
     CONTEXT_VOCABS,
     CTX_COLUMNS,
-    NUM_CARD_TOKENS,
     NUM_CONTEXT_TOKENS,
     NUM_POSITION_SLOTS,
     NUM_TYPES,
@@ -36,8 +35,10 @@ class HokmTransformerExtractor(BaseFeaturesExtractor):
 
     The observation is tokenized into up to 13 hand tokens, up to 4 trick
     tokens in play order, up to 48 history tokens in recency order, and 5
-    context tokens (trump, phase, tricks, points, seat). Card tokens share one
-    embedding table (52 cards + PAD); each context slot has its own embedding
+    context tokens (trump, phase, tricks, points, seat). Card tokens are
+    factorized into a shared rank embedding (13 rows) plus a two-row trump-flag
+    embedding, summed — the suit label itself never enters the input, only the
+    fact that a card is (or is not) trump; each context slot has its own embedding
     over its bounded value range. Learned type embeddings separate the four
     groups; learned positional embeddings mark order-sensitive slots (trick
     play order, history recency). Hand tokens carry no positional embedding —
@@ -96,7 +97,8 @@ class HokmTransformerExtractor(BaseFeaturesExtractor):
         super().__init__(observation_space, features_dim or d_model)
         self.d_model = d_model
 
-        self.card_embedding = th.nn.Embedding(NUM_CARD_TOKENS, d_model)
+        self.rank_embedding = th.nn.Embedding(NUM_RANKS, d_model)
+        self.trump_flag_embedding = th.nn.Embedding(2, d_model)
         self.type_embedding = th.nn.Embedding(NUM_TYPES, d_model)
         self.position_embedding = th.nn.Embedding(NUM_POSITION_SLOTS, d_model)
         self.role_embedding = th.nn.Embedding(ROLE_VOCAB, d_model)
@@ -148,14 +150,15 @@ class HokmTransformerExtractor(BaseFeaturesExtractor):
     def _embed(self, tokens: TokenizedObservation) -> th.Tensor:
         """Combine card, type, position, and context embeddings.
 
-        Card slots take the shared card embedding; context slots (whose
-        ``tokens`` entry is a value index, not a card id) take their per-slot
-        embedding. Type and positional embeddings are added on top.
+        Card slots take the summed rank + trump-flag embeddings (non-card
+        slots index row 0 / flag False — their entries are value indices, not
+        cards, and the context embedding below replaces them anyway); context
+        slots take their per-slot embedding. Type, positional, and role
+        embeddings are added on top.
         """
-        # Non-card slots must not index the card table (their token entry is a
-        # context value index, not a card id); route them to PAD first.
-        card_ids = th.where(tokens.is_card, tokens.tokens, PAD_TOKEN)
-        x = self.card_embedding(card_ids)
+        trump = tokens.is_trump.to(th.long)
+        x = self.rank_embedding(tokens.ranks * tokens.is_card.to(th.long))
+        x = x + self.trump_flag_embedding(trump * tokens.is_card.to(th.long))
 
         # Context values replace the (zeroed) card embedding at their slots.
         context_stack: th.Tensor = th.stack(

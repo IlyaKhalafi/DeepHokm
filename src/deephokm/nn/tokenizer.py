@@ -14,9 +14,13 @@ recent plays: which cards are gone is the central read in a trick-taking
 game, and truncating the group hides most of it. Forty-eight extra tokens
 cost nothing at this model size.
 
-Card tokens index a shared ``nn.Embedding(53, d_model)`` (52 cards + PAD).
-Context tokens are not cards: each carries a bounded integer feature value
-that the extractor maps through a dedicated per-slot embedding. Learned type
+Card tokens are factorized into a rank (``card_id % 13``, the token's
+``ranks`` entry) and a trump flag (``is_trump``: the card's suit matches the
+declared trump suit; always False while the trump is still all-zero) that the
+extractor maps through a shared rank embedding and a two-row trump-flag
+embedding. Context tokens are not cards: each carries a bounded integer
+feature value that the extractor maps through a dedicated per-slot embedding.
+Learned type
 embeddings distinguish hand/trick/history/context, and learned positional
 embeddings mark order-sensitive slots (trick play order, history position).
 Hand tokens get no positional embedding — the hand is a set.
@@ -29,7 +33,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch as th
 
-from deephokm.cards import NUM_CARDS, PAD_TOKEN
+from deephokm.cards import NUM_RANKS, PAD_TOKEN
 from deephokm.env.spaces import HISTORY_SLOTS, Observation
 from deephokm.rules.state import NUM_SEATS, TRICKS_PER_HAND
 
@@ -70,7 +74,6 @@ POINTS_VOCAB = 8 * 8  # game-points pair
 SEAT_VOCAB = NUM_SEATS + 1  # acting seat, or "none" pre-deal
 CONTEXT_VOCABS = (TRUMP_VOCAB, PHASE_VOCAB, SCORES_VOCAB, POINTS_VOCAB, SEAT_VOCAB)
 
-NUM_CARD_TOKENS = NUM_CARDS + 1  # 52 cards + PAD
 NUM_POSITION_SLOTS = max(NUM_HAND_SLOTS, NUM_TRICK_SLOTS, NUM_HISTORY_SLOTS)
 
 
@@ -84,6 +87,12 @@ class TokenizedObservation:
             routes them through per-slot embeddings, never the card table).
         is_card: ``(batch, MAX_TOKENS)`` bool; True where ``tokens`` holds a
             card id.
+        ranks: ``(batch, MAX_TOKENS)`` int64 rank index (``card_id % 13``)
+            for card slots; 0 elsewhere (the extractor only indexes its rank
+            embedding on card slots).
+        is_trump: ``(batch, MAX_TOKENS)`` bool; True for card slots whose
+            card's suit matches the declared trump suit; False while the
+            trump is still all-zero.
         type_ids: ``(batch, MAX_TOKENS)`` int64 token-type ids.
         positions: ``(batch, MAX_TOKENS)`` int64 slot positions within a type
             (always 0 for hand tokens: the hand is a set).
@@ -99,6 +108,8 @@ class TokenizedObservation:
 
     tokens: th.Tensor
     is_card: th.Tensor
+    ranks: th.Tensor
+    is_trump: th.Tensor
     type_ids: th.Tensor
     positions: th.Tensor
     roles: th.Tensor
@@ -127,6 +138,11 @@ def _trick_play_order(observation: Observation) -> list[tuple[int, int]]:
     acting_seat = int(np.argmax(seat_onehot)) if seat_onehot.sum() else 0
     played_mask = trick_play >= 0
     if not played_mask.any():
+        return []
+    if played_mask.all():
+        # A completed trick never appears in a learner observation (HokmEnv
+        # resets it before handing control over); emit zero trick tokens so
+        # this path agrees with the batch tokenizer on synthetic inputs.
         return []
     leader = -1
     for seat in range(NUM_SEATS):
@@ -160,6 +176,85 @@ def _context_values(observation: Observation) -> list[int]:
     return [trump_value, phase_value, scores_index, points_index, seat_value]
 
 
+def _rank_trump_flags(card_ids: list[int], trump_suit: int) -> tuple[list[int], list[bool]]:
+    """Per-card rank indices and trump flags for a list of card ids.
+
+    ``trump_suit`` is the declared trump suit id, or -1 while the trump is
+    still all-zero (in which case every flag is False).
+    """
+    ranks = [c % NUM_RANKS for c in card_ids]
+    is_trump = [trump_suit >= 0 and c // NUM_RANKS == trump_suit for c in card_ids]
+    return ranks, is_trump
+
+
+@dataclass(slots=True)
+class _RowBuffers:
+    """The eight per-row token lists that :func:`tokenize` fills."""
+
+    tokens: list[int]
+    is_card: list[bool]
+    ranks: list[int]
+    is_trump: list[bool]
+    type_ids: list[int]
+    positions: list[int]
+    roles: list[int]
+    padding: list[bool]
+
+
+@dataclass(slots=True)
+class _BatchBuffers:
+    """The eight batched token tensors that :func:`tokenize_tensor_batch` fills."""
+
+    tokens: th.Tensor
+    is_card: th.Tensor
+    ranks: th.Tensor
+    is_trump: th.Tensor
+    type_ids: th.Tensor
+    positions: th.Tensor
+    roles: th.Tensor
+    padding: th.Tensor
+
+
+def _fill_card_group(
+    buffers: _RowBuffers,
+    *,
+    offset: int,
+    cards: list[int],
+    group_ranks: list[int],
+    group_trumps: list[bool],
+    type_id: int,
+    with_positions: bool,
+    roles_values: list[int] | None,
+) -> None:
+    """Write one hand/trick/history card group into the flat token lists.
+
+    Args:
+        buffers: The per-row token lists (modified in place).
+        offset: First column of this group.
+        cards: Card ids for this group, in slot order.
+        group_ranks: Precomputed rank index per card.
+        group_trumps: Precomputed trump flag per card.
+        type_id: Token-type id for this group (TYPE_HAND/TYPE_TRICK/TYPE_HISTORY).
+        with_positions: Write the slot index into ``positions`` (trick and
+            history are order-sensitive; the hand is a set, so no position).
+        roles_values: One role per card, or None for the fixed role 0 (hand).
+    """
+    for i, card in enumerate(cards):
+        col = offset + i
+        buffers.tokens[col] = card
+        buffers.is_card[col] = True
+        buffers.ranks[col] = group_ranks[i]
+        buffers.is_trump[col] = group_trumps[i]
+        buffers.type_ids[col] = type_id
+        if with_positions:
+            buffers.positions[col] = i
+        if roles_values is not None:
+            buffers.roles[col] = roles_values[i]
+        else:
+            buffers.roles[col] = 0
+        buffers.padding[col] = True
+
+
 def tokenize(observation: Observation) -> TokenizedObservation:
     """Tokenize a single observation into a batch of size 1.
 
@@ -173,6 +268,8 @@ def tokenize(observation: Observation) -> TokenizedObservation:
         The padded token batch.
     """
     hand = sorted(_hand_ids(observation))[:NUM_HAND_SLOTS]
+    trump_vec = np.asarray(observation["trump"])
+    trump_suit = int(np.argmax(trump_vec)) if trump_vec.sum() else -1
     trick = _trick_play_order(observation)[:NUM_TRICK_SLOTS]
     # History arrives already ordered (most recent completed-trick play
     # first) and -1 padded; history_role is padded in lockstep.
@@ -183,49 +280,67 @@ def tokenize(observation: Observation) -> TokenizedObservation:
     history_roles = [int(r) for r in raw_history_role[history_valid][:NUM_HISTORY_SLOTS]]
     context = _context_values(observation)
 
-    tokens = [PAD_TOKEN] * MAX_TOKENS
-    is_card = [False] * MAX_TOKENS
-    type_ids = [TYPE_CONTEXT] * MAX_TOKENS
-    positions = [0] * MAX_TOKENS
-    roles = [ROLE_NA] * MAX_TOKENS
-    padding = [False] * MAX_TOKENS
+    buffers = _RowBuffers(
+        tokens=[PAD_TOKEN] * MAX_TOKENS,
+        is_card=[False] * MAX_TOKENS,
+        ranks=[0] * MAX_TOKENS,
+        is_trump=[False] * MAX_TOKENS,
+        type_ids=[TYPE_CONTEXT] * MAX_TOKENS,
+        positions=[0] * MAX_TOKENS,
+        roles=[ROLE_NA] * MAX_TOKENS,
+        padding=[False] * MAX_TOKENS,
+    )
 
-    for i, card in enumerate(hand):
-        tokens[i] = card
-        is_card[i] = True
-        type_ids[i] = TYPE_HAND
-        roles[i] = 0  # hand cards are always the acting seat's own
-        padding[i] = True
-    for i, (card, role) in enumerate(trick):
-        col = NUM_HAND_SLOTS + i
-        tokens[col] = card
-        is_card[col] = True
-        type_ids[col] = TYPE_TRICK
-        positions[col] = i
-        roles[col] = role
-        padding[col] = True
-    for i, (card, role) in enumerate(zip(history, history_roles, strict=True)):
-        col = NUM_HAND_SLOTS + NUM_TRICK_SLOTS + i
-        tokens[col] = card
-        is_card[col] = True
-        type_ids[col] = TYPE_HISTORY
-        positions[col] = i
-        roles[col] = role
-        padding[col] = True
+    hand_ranks, hand_trumps = _rank_trump_flags(hand, trump_suit)
+    _fill_card_group(
+        buffers,
+        offset=0,
+        cards=hand,
+        group_ranks=hand_ranks,
+        group_trumps=hand_trumps,
+        type_id=TYPE_HAND,
+        with_positions=False,
+        roles_values=None,
+    )
+    trick_cards = [card for card, _ in trick]
+    trick_ranks, trick_trumps = _rank_trump_flags(trick_cards, trump_suit)
+    _fill_card_group(
+        buffers,
+        offset=NUM_HAND_SLOTS,
+        cards=trick_cards,
+        group_ranks=trick_ranks,
+        group_trumps=trick_trumps,
+        type_id=TYPE_TRICK,
+        with_positions=True,
+        roles_values=[role for _, role in trick],
+    )
+    hist_ranks, hist_trumps = _rank_trump_flags(history, trump_suit)
+    _fill_card_group(
+        buffers,
+        offset=NUM_HAND_SLOTS + NUM_TRICK_SLOTS,
+        cards=history,
+        group_ranks=hist_ranks,
+        group_trumps=hist_trumps,
+        type_id=TYPE_HISTORY,
+        with_positions=True,
+        roles_values=history_roles,
+    )
     for slot, column in enumerate(CTX_COLUMNS):
-        tokens[column] = context[slot]
-        type_ids[column] = TYPE_CONTEXT
-        positions[column] = slot
-        padding[column] = True
+        buffers.tokens[column] = context[slot]
+        buffers.type_ids[column] = TYPE_CONTEXT
+        buffers.positions[column] = slot
+        buffers.padding[column] = True
 
     return TokenizedObservation(
-        tokens=th.tensor([tokens], dtype=th.int64),
-        is_card=th.tensor([is_card], dtype=th.bool),
-        type_ids=th.tensor([type_ids], dtype=th.int64),
-        positions=th.tensor([positions], dtype=th.int64),
-        roles=th.tensor([roles], dtype=th.int64),
+        tokens=th.tensor([buffers.tokens], dtype=th.int64),
+        is_card=th.tensor([buffers.is_card], dtype=th.bool),
+        ranks=th.tensor([buffers.ranks], dtype=th.int64),
+        is_trump=th.tensor([buffers.is_trump], dtype=th.bool),
+        type_ids=th.tensor([buffers.type_ids], dtype=th.int64),
+        positions=th.tensor([buffers.positions], dtype=th.int64),
+        roles=th.tensor([buffers.roles], dtype=th.int64),
         context_values=th.tensor([context], dtype=th.int64),
-        padding_mask=th.tensor([padding], dtype=th.bool),
+        padding_mask=th.tensor([buffers.padding], dtype=th.bool),
     )
 
 
@@ -253,6 +368,23 @@ def _compact_left(ids: th.Tensor, valid: th.Tensor) -> tuple[th.Tensor, th.Tenso
     counts = valid.sum(dim=1, keepdim=True)
     result = th.where(positions < counts, packed, PAD_TOKEN)
     return result, counts.squeeze(1)
+
+
+def _is_trump(card_ids: th.Tensor, trump: th.Tensor, valid: th.Tensor) -> th.Tensor:
+    """Per-card trump flags: the card's suit matches the declared trump suit.
+
+    Args:
+        card_ids: ``(batch, width)`` int64 card ids (PAD in invalid slots).
+        trump: ``(batch, 4)`` int64 one-hot trump suit; all zeros while
+            undeclared.
+        valid: ``(batch, width)`` bool; False where the slot holds PAD.
+
+    Returns:
+        ``(batch, width)`` bool.
+    """
+    declared = trump.sum(dim=1) > 0
+    suit = card_ids // NUM_RANKS
+    return valid & (suit == trump.argmax(dim=1, keepdim=True)) & declared.view(-1, 1)
 
 
 def _binary_to_ids(mask: th.Tensor, limit: int | None) -> tuple[th.Tensor, th.Tensor]:
@@ -306,6 +438,10 @@ def _batch_card_groups(
     seats = (leader.view(-1, 1) + offsets) % NUM_SEATS
     seq = th.gather(trick_play, 1, seats)  # play order; -1 where absent
     seq_valid = seq >= 0
+    # A fully-played trick never appears in a learner observation; zero it so
+    # this path agrees with the single-row tokenizer (which returns no trick
+    # tokens for the same synthetic input) instead of emitting seat order.
+    seq_valid = seq_valid & ~played.all(dim=1, keepdim=True)
     trick_ids, n_trick = _compact_left(th.where(seq_valid, seq, PAD_TOKEN), seq_valid)
     # _compact_left's packing permutation is a deterministic function of
     # `valid` alone (stable-sorts on ~valid, never on the ids' own values),
@@ -345,6 +481,43 @@ def _batch_context(
     return th.stack([trump_value, phase_value, scores_index, points_index, seat_value], dim=1)
 
 
+def _fill_batch_card_group(
+    buffers: _BatchBuffers,
+    *,
+    col_slice: slice,
+    card_ids: th.Tensor,
+    valid: th.Tensor,
+    trump: th.Tensor,
+    type_id: int,
+    positions_values: th.Tensor | None,
+    roles_values: th.Tensor | None,
+) -> None:
+    """Write one hand/trick/history card group into the batched token tensors.
+
+    Args:
+        buffers: The batched token tensors (modified in place).
+        col_slice: Column range of this group.
+        card_ids: Left-packed card ids for this group, ``(batch, group width)``.
+        valid: ``(batch, group width)`` bool; True where the slot holds a card.
+        trump: ``(batch, 4)`` one-hot trump suit.
+        type_id: Token-type id for this group (TYPE_HAND/TYPE_TRICK/TYPE_HISTORY).
+        positions_values: Position index per slot for this group's width, or
+            None for a group with no positions (the hand is a set).
+        roles_values: Per-card roles, or None for the fixed role 0 (hand).
+    """
+    buffers.tokens[:, col_slice] = card_ids
+    buffers.is_card[:, col_slice] = valid
+    buffers.ranks[:, col_slice] = th.where(valid, card_ids % NUM_RANKS, 0)
+    buffers.is_trump[:, col_slice] = _is_trump(card_ids, trump, valid)
+    buffers.type_ids[:, col_slice] = th.where(valid, type_id, TYPE_CONTEXT)
+    if positions_values is not None:
+        buffers.positions[:, col_slice] = th.where(valid, positions_values, 0)
+    if roles_values is not None:
+        buffers.roles[:, col_slice] = th.where(valid, roles_values, ROLE_NA)
+    else:
+        buffers.roles[:, col_slice] = th.where(valid, 0, ROLE_NA)
+
+
 def tokenize_tensor_batch(observations: dict[str, th.Tensor]) -> TokenizedObservation:
     """Tokenize a dict of stacked observation tensors (the training hot path).
 
@@ -376,51 +549,71 @@ def tokenize_tensor_batch(observations: dict[str, th.Tensor]) -> TokenizedObserv
     )
     context_values = _batch_context(trump, phase, tricks_won, game_points, seat)
 
-    tokens = th.full((n, MAX_TOKENS), PAD_TOKEN, dtype=th.int64, device=device)
-    is_card = th.zeros((n, MAX_TOKENS), dtype=th.bool, device=device)
-    type_ids = th.full((n, MAX_TOKENS), TYPE_CONTEXT, dtype=th.int64, device=device)
-    positions = th.zeros((n, MAX_TOKENS), dtype=th.int64, device=device)
-    roles = th.full((n, MAX_TOKENS), ROLE_NA, dtype=th.int64, device=device)
-    padding = th.zeros((n, MAX_TOKENS), dtype=th.bool, device=device)
-
-    tokens[:, HAND_SLICE] = hand_ids
-    hand_valid = th.arange(NUM_HAND_SLOTS, device=device).unsqueeze(0) < n_hand.unsqueeze(1)
-    is_card[:, HAND_SLICE] = hand_valid
-    type_ids[:, HAND_SLICE] = th.where(hand_valid, TYPE_HAND, TYPE_CONTEXT)
-    roles[:, HAND_SLICE] = th.where(hand_valid, 0, ROLE_NA)
-
-    tokens[:, TRICK_SLICE] = trick_ids[:, :NUM_TRICK_SLOTS]
-    trick_valid = th.arange(NUM_TRICK_SLOTS, device=device).unsqueeze(0) < n_trick.unsqueeze(1)
-    is_card[:, TRICK_SLICE] = trick_valid
-    type_ids[:, TRICK_SLICE] = th.where(trick_valid, TYPE_TRICK, TYPE_CONTEXT)
-    positions[:, TRICK_SLICE] = th.where(trick_valid, th.arange(NUM_TRICK_SLOTS, device=device), 0)
-    roles[:, TRICK_SLICE] = th.where(trick_valid, trick_roles[:, :NUM_TRICK_SLOTS], ROLE_NA)
-
-    hist_valid = history_ids != PAD_TOKEN
-    tokens[:, HISTORY_SLICE] = history_ids
-    is_card[:, HISTORY_SLICE] = hist_valid
-    type_ids[:, HISTORY_SLICE] = th.where(hist_valid, TYPE_HISTORY, TYPE_CONTEXT)
-    positions[:, HISTORY_SLICE] = th.where(
-        hist_valid, th.arange(NUM_HISTORY_SLOTS, device=device), 0
+    buffers = _BatchBuffers(
+        tokens=th.full((n, MAX_TOKENS), PAD_TOKEN, dtype=th.int64, device=device),
+        is_card=th.zeros((n, MAX_TOKENS), dtype=th.bool, device=device),
+        ranks=th.zeros((n, MAX_TOKENS), dtype=th.int64, device=device),
+        is_trump=th.zeros((n, MAX_TOKENS), dtype=th.bool, device=device),
+        type_ids=th.full((n, MAX_TOKENS), TYPE_CONTEXT, dtype=th.int64, device=device),
+        positions=th.zeros((n, MAX_TOKENS), dtype=th.int64, device=device),
+        roles=th.full((n, MAX_TOKENS), ROLE_NA, dtype=th.int64, device=device),
+        padding=th.zeros((n, MAX_TOKENS), dtype=th.bool, device=device),
     )
-    roles[:, HISTORY_SLICE] = th.where(hist_valid, history_roles, ROLE_NA)
+
+    hand_valid = th.arange(NUM_HAND_SLOTS, device=device).unsqueeze(0) < n_hand.unsqueeze(1)
+    _fill_batch_card_group(
+        buffers,
+        col_slice=HAND_SLICE,
+        card_ids=hand_ids,
+        valid=hand_valid,
+        trump=trump,
+        type_id=TYPE_HAND,
+        positions_values=None,
+        roles_values=None,
+    )
+    trick_ids = trick_ids[:, :NUM_TRICK_SLOTS]
+    trick_roles = trick_roles[:, :NUM_TRICK_SLOTS]
+    trick_valid = th.arange(NUM_TRICK_SLOTS, device=device).unsqueeze(0) < n_trick.unsqueeze(1)
+    _fill_batch_card_group(
+        buffers,
+        col_slice=TRICK_SLICE,
+        card_ids=trick_ids,
+        valid=trick_valid,
+        trump=trump,
+        type_id=TYPE_TRICK,
+        positions_values=th.arange(NUM_TRICK_SLOTS, device=device),
+        roles_values=trick_roles,
+    )
+    hist_valid = history_ids != PAD_TOKEN
+    _fill_batch_card_group(
+        buffers,
+        col_slice=HISTORY_SLICE,
+        card_ids=history_ids,
+        valid=hist_valid,
+        trump=trump,
+        type_id=TYPE_HISTORY,
+        positions_values=th.arange(NUM_HISTORY_SLOTS, device=device),
+        roles_values=history_roles,
+    )
 
     for slot, column in enumerate(CTX_COLUMNS):
-        tokens[:, column] = context_values[:, slot]
-        type_ids[:, column] = TYPE_CONTEXT
-        positions[:, column] = slot
-        padding[:, column] = True
+        buffers.tokens[:, column] = context_values[:, slot]
+        buffers.type_ids[:, column] = TYPE_CONTEXT
+        buffers.positions[:, column] = slot
+        buffers.padding[:, column] = True
 
-    padding[:, HAND_SLICE] = is_card[:, HAND_SLICE]
-    padding[:, TRICK_SLICE] = is_card[:, TRICK_SLICE]
-    padding[:, HISTORY_SLICE] = is_card[:, HISTORY_SLICE]
+    buffers.padding[:, HAND_SLICE] = buffers.is_card[:, HAND_SLICE]
+    buffers.padding[:, TRICK_SLICE] = buffers.is_card[:, TRICK_SLICE]
+    buffers.padding[:, HISTORY_SLICE] = buffers.is_card[:, HISTORY_SLICE]
 
     return TokenizedObservation(
-        tokens=tokens,
-        is_card=is_card,
-        type_ids=type_ids,
-        positions=positions,
-        roles=roles,
+        tokens=buffers.tokens,
+        is_card=buffers.is_card,
+        ranks=buffers.ranks,
+        is_trump=buffers.is_trump,
+        type_ids=buffers.type_ids,
+        positions=buffers.positions,
+        roles=buffers.roles,
         context_values=context_values,
-        padding_mask=padding,
+        padding_mask=buffers.padding,
     )
