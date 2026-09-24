@@ -238,3 +238,28 @@ trained weights would change how the model plays without raising an error, and
 the feature builder used at play time must match the one used in training
 exactly or the network sees a different input distribution than it trained on
 (verified at 0.0 difference over real states).
+
+## 10. Hybrid win rate: pre-registered evaluation
+
+Exploratory runs (RankCNN 3x nominating its top 3, sign test confirming each
+against greedy) established the shape of the verify-K trade:
+
+| verify-K | matches | win rate | 95% CI | pure search at same K | lift |
+|---|---|---|---|---|---|
+| 48 | 122 | 0.713 | [0.633, 0.793] | 0.570 | +0.143 |
+| 192 | 140 | 0.814 | [0.750, 0.879] | 0.730 | +0.084 |
+| 384 | 42 | 0.833 | [0.721, 0.946] | 0.790 | +0.043 |
+
+These are exploratory, and reporting the best of several configurations as if
+it were a single test would overstate the result. Note also the power question: at a
+true rate of 0.81, a 95% interval excludes 0.80 only near n = 2500, so a point
+estimate above target is not the same as a demonstrated one.
+
+The confirmatory evaluation is therefore pre-registered before it is run:
+
+- policy: `deephokm.policies.numpy_hybrid.NumpyHybridPolicy`, the shipped
+  module, loading `checkpoints/qnet_numpy.npz` -- not the research harness, so
+  the number cannot be an artifact of evaluation code that ships with nothing
+- verify-K 768, top-M 3, p <= 0.05
+- 400 matches, seeds from base 77,000,000, disjoint from every run above
+- success: the lower bound of the 95% interval exceeds 0.80
