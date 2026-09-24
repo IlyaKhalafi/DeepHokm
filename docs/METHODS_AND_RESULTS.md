@@ -260,6 +260,22 @@ The confirmatory evaluation is therefore pre-registered before it is run:
 - policy: `deephokm.policies.numpy_hybrid.NumpyHybridPolicy`, the shipped
   module, loading `checkpoints/qnet_numpy.npz` -- not the research harness, so
   the number cannot be an artifact of evaluation code that ships with nothing
-- verify-K 768, top-M 3, p <= 0.05
-- 400 matches, seeds from base 77,000,000, disjoint from every run above
+- verify-K 1536, top-M 3, p <= 0.05
+- 600 matches, seeds from base 77,000,000, disjoint from every run above
 - success: the lower bound of the 95% interval exceeds 0.80
+
+The verify-K and sample size were amended from an initial 768/400 **before any
+data at either setting existed**, on power grounds alone. The lower bound of a
+95% interval at n=400 reaches 0.80 only if the true rate is about 0.84:
+
+| true rate | n=400 | n=600 | n=800 |
+|---|---|---|---|
+| 0.82 | 0.782 | 0.789 | 0.793 |
+| 0.84 | 0.804 | 0.811 | 0.815 |
+| 0.85 | 0.815 | 0.821 | 0.825 |
+
+Pure search scores 0.795 at K=768 and 0.818 at K=1536, and the hybrid's lift
+over pure search is decaying with K (+0.143 at 48, +0.084 at 192, +0.035 at
+384), so K=768 would most likely land near 0.82 -- a true rate above target
+that the test would nonetheless fail to demonstrate. K=1536 with 600 matches
+is the smallest design that can actually detect the effect if it is there.
