@@ -8,7 +8,7 @@ from the module that actually ships, loading the actual .npz weights.
 Seeds are disjoint from every earlier evaluation: reusing seeds that guided the
 choice of checkpoint and verify-K would report a tuned number as a held-out one.
 
-argv: shard n_shards matches verify_k top_m weights_npz
+argv: shard n_shards matches verify_k top_m weights_npz [seed_base]
 """
 import sys
 from pathlib import Path
@@ -21,17 +21,23 @@ from deephokm.policies.numpy_hybrid import NumpyHybridPolicy  # noqa: E402
 from deephokm.rules.engine import HokmEngine  # noqa: E402
 from deephokm.rules.state import Phase  # noqa: E402
 
-SEED_BASE = 77_000_000  # disjoint from all tuning evaluations
+DEFAULT_SEED_BASE = 77_000_000  # disjoint from all tuning evaluations
+ARG_SEED_BASE = 6  # argv index past which an explicit base was given
 
 shard, n_shards, matches, verify_k, top_m = (int(x) for x in sys.argv[1:6])
 weights = Path(sys.argv[6])
+seed_base = (
+    int(sys.argv[ARG_SEED_BASE + 1])
+    if len(sys.argv) > ARG_SEED_BASE + 1
+    else DEFAULT_SEED_BASE
+)
 
 greedy = GreedyPolicy()
 wins = 0
 played = 0
 
 for index in range(shard, matches, n_shards):
-    seed = SEED_BASE + index
+    seed = seed_base + index
     team = index % 2
     policy = NumpyHybridPolicy(
         weights, verify_samples=verify_k, top_m=top_m, seed=seed

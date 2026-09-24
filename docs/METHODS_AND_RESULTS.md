@@ -290,3 +290,40 @@ over pure search is decaying with K (+0.143 at 48, +0.084 at 192, +0.035 at
 384), so K=768 would most likely land near 0.82 -- a true rate above target
 that the test would nonetheless fail to demonstrate. K=1536 with 600 matches
 is the smallest design that can actually detect the effect if it is there.
+
+## 11. The nomination crossover, and what it means for the registered test
+
+The pre-registered K=1536 design assumed the hybrid's win rate rises with
+verify-K. It does not. Measured lift over pure search at matched K:
+
+| verify-K | hybrid | pure search | lift |
+|---|---|---|---|
+| 48 | 0.713 | 0.570 | +0.143 |
+| 192 | 0.790 | 0.730 | +0.060 |
+| 384 | 0.838 | 0.790 | +0.048 |
+| 1536 | 0.809 (n=47, interim) | 0.818 | -0.009 |
+
+Top-M nomination is a restriction, not just a speed-up. At small K the search
+is noisy and confining it to the network's three best actions concentrates
+scarce rollouts where they matter. At large K the search is accurate enough on
+its own, and the restriction starts excluding the action full search would
+have chosen -- so the network stops adding and begins subtracting. The
+crossover sits somewhere between K=384 and K=1536.
+
+This invalidates the registered design's premise: K=1536 was chosen to raise
+the win rate, and it lowers it. The registered run is reported as it stands
+(interim, n=47), and a second confirmation is registered below at the setting
+the crossover actually favours. Two tests are now being run against the same
+0.80 target, which is stated here so the multiplicity is visible rather than
+hidden; both results are reported regardless of outcome.
+
+### Second registered confirmation
+
+- policy: `deephokm.policies.numpy_hybrid.NumpyHybridPolicy` with
+  `checkpoints/qnet_numpy.npz`
+- verify-K 384, top-M 3, p <= 0.05
+- 600 matches, seed base 91,000,000 -- disjoint from the tuning runs and from
+  the K=1536 registered run, so the two tests share no matches
+- success: the lower bound of the 95% interval exceeds 0.80
+- expected: the K=384 exploratory rate was 0.838 over 117 matches, which at
+  n=600 would give a lower bound near 0.809
