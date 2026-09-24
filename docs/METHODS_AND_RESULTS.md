@@ -70,11 +70,19 @@ hidden information — the same inputs a card-counting human has.
 | 384 | 0.790 | ~2.4 s/decision |
 | 768 | 0.795 | ~5 s/decision |
 | 1536 | 0.818 | ~10 s/decision |
+| 3072 | 0.852@n=128 | n/a |
+| 6144 | 0.883@n=128 (113/128, 16/16 shards) | n/a |
+| 12288 | in flight (seeds 1800000+, 16 shards) | n/a |
 
-Win rate rises monotonically through K=1536, with flattening returns
-above K=384 (0.790 -> 0.795 -> 0.818). Best measured legal policy:
-**0.818 match win rate at K=1536** — exceeding the original 80% target.
-The cost/quality sweet spot remains K=384 for practical play.
+Win rate rises monotonically through K=6144 with no saturation in
+sight: gains per doubling are
+0.570 -> 0.635 -> 0.730 -> 0.790 -> 0.795 -> 0.818 -> 0.852 -> 0.883.
+The apparent K=384-1536 plateau (0.790 -> 0.795 -> 0.818) broke —
+K=3072 (0.852) and K=6144 (0.883) keep climbing, +3.1pp for the last
+doubling, so the curve is not saturated. Best measured legal policy:
+**0.883 match win rate at K=6144**. A K=12288 sweep is in flight
+(seeds 1800000+, 16 shards) to find where it flattens. The
+cost/quality sweet spot remains K=384 for practical play.
 
 ## 5. Q-network experiments
 
@@ -111,8 +119,9 @@ K through at least K=768.
 
 ## Next steps (in flight)
 
-1. ~~K saturation~~: reached at K~384 (0.790); K=768 (0.795) confirms the
-   plateau. K=1536 confirmation run in progress.
+1. ~~K saturation~~: no longer observed. Gains per doubling hold through
+   K=6144 (0.852 -> 0.883); K=12288 sweep in flight (seeds 1800000+,
+   16 shards) to find the actual knee.
 2. Q-network: replace the K sampled rollouts with a learned action-value
    approximation (same legal inputs), trained supervised on per-action
    search Q-estimates (data generation running at K=192 labels).
