@@ -460,3 +460,39 @@ wins 0.730 of its own matches, so a student of it was never going to carry a
 hybrid past 0.80 -- the constraint recorded in section 2 ("cloning is a floor,
 not a lift") applied to this plan the whole time and was not acted on until the
 measurements forced it.
+
+## 15. A throughput estimate that was wrong by 14x
+
+Every generation-time estimate in this project was built on 28 labelled
+decisions per match. The real figure is about 400.
+
+The error came from the first generator's progress line,
+`print(f"shard {w}: {i-w//W+1} matches, ...")`. With shards strided as
+`range(w, N, W)`, `i` is a seed index, not a match count, so a shard reporting
+"36 matches, 1003 decisions" had actually played three matches -- and 1003/3 is
+334, not 28. A Hokm match runs to seven game points, roughly thirteen hands of
+thirteen tricks with two controlled seats, so a few hundred decisions per match
+is what the rules imply; 28 should never have survived a sanity check against
+them.
+
+Consequences, both directions:
+
+- Costs were understated. At K=3072 a match is ~3.4h CPU, so the original
+  `CHECKPOINT_EVERY = 5` put the first usable shard about 19h away, not the
+  72 minutes claimed. Checkpointing is now per match, and the progress line
+  reports decisions-per-match so the figure cannot silently drift again.
+- Requirements were overstated. Thirty thousand decisions is ~75 matches, not
+  the 600 planned. The target dataset is far cheaper than the corrected
+  per-match cost suggests.
+
+Revised, with 400 decisions/match measured rather than assumed:
+
+| K | CPU per match | 8 workers, 5 matches each | teacher win rate |
+|---|---|---|---|
+| 768 | 0.9 h | 4.5 h (~16k decisions) | 0.795 |
+| 1536 | 1.7 h | 8.6 h (~16k decisions) | 0.818 |
+| 3072 | 3.4 h | 17 h (~16k decisions) | 0.852 |
+
+Current allocation: ten workers continue at K=3072 (their accumulated CPU is
+not discarded), and eight run at K=1536 with per-match checkpointing, so
+usable labels arrive in under two hours instead of most of a day.
