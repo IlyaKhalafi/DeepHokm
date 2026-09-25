@@ -61,11 +61,13 @@ def resolve_model_path() -> str:
     return os.environ.get("DEEPHOKM_MODEL", DEFAULT_MODEL_PATH)
 
 
-def build_opponents(served: ServedPolicy | None) -> list[Any]:
+def build_opponents(served: Any | None) -> list[Any]:
     """Opponent list: the served policy at every seat (learner slot included).
 
     The env ignores the entry for its own seat, so one list serves both
-    human and spectate modes.
+    human and spectate modes. Any object implementing the ``HokmPolicy``
+    protocol is accepted, so the network-plus-search policy and the
+    reinforcement-learning checkpoint are interchangeable here.
     """
     if served is None:
         return [RandomPolicy(11 + i) for i in range(4)]

@@ -178,6 +178,8 @@ function render() {
     const tag = document.createElement("span");
     tag.className = "seat-count-tag";
     tag.textContent = `${state.hand_counts[seat]}`;
+    tag.title = `${state.hand_counts[seat]} cards left in this hand`;
+    tag.setAttribute("aria-label", tag.title);
     holder.appendChild(tag);
   }
 
@@ -187,12 +189,25 @@ function render() {
     const holder = $(`cards-${entry.seat}`);
     holder.innerHTML = "";
     const el = cardEl(entry.card, { tiny: true });
-    if (i === 0) el.classList.add("led");
-    if (i === state.table.length - 1) el.classList.add("last-play");
+    if (i === 0) {
+      el.classList.add("led");
+      el.title = "led this trick";
+    }
+    if (i === state.table.length - 1) {
+      el.classList.add("last-play");
+      el.title = el.title ? `${el.title} · latest play` : "latest play";
+      const caret = document.createElement("span");
+      caret.className = "play-caret";
+      caret.textContent = "\u25B2";
+      caret.setAttribute("aria-hidden", "true");
+      el.appendChild(caret);
+    }
     holder.appendChild(el);
     const tag = document.createElement("span");
     tag.className = "seat-count-tag";
     tag.textContent = `${state.hand_counts[entry.seat]}`;
+    tag.title = `${state.hand_counts[entry.seat]} cards left in this hand`;
+    tag.setAttribute("aria-label", tag.title);
     holder.appendChild(tag);
   }
 
@@ -200,6 +215,10 @@ function render() {
   // (leading a trick, trump selection, and match-over all show an empty
   // table, where "led the trick" / "latest play" refer to nothing yet).
   $("trick-legend").classList.toggle("hidden", state.table.length === 0);
+  // "TABLE" only helps while the felt is empty; with cards down it is noise
+  // sitting in the middle of the play area.
+  const centre = $("trick-center");
+  if (centre) centre.classList.toggle("hidden", state.table.length > 0);
 
   // hand: in spectate mode the API sends no private hand; the bottom row is
   // removed so the layout reads as a spectator view, not a missing player.
@@ -362,3 +381,28 @@ document.addEventListener("DOMContentLoaded", () => {
     btn.addEventListener("click", () => playAction(52 + parseInt(btn.dataset.suit, 10)));
   });
 });
+
+
+// Report the live engine in the footer: which policy is playing and how many
+// worlds it samples per decision. The UI previously described itself as
+// reinforcement-learned, which is not what plays here.
+async function showEngine() {
+  const el = document.getElementById("engine");
+  if (!el) return;
+  try {
+    const response = await fetch("/health");
+    if (!response.ok) return;
+    const info = await response.json();
+    if (!info.model_loaded) {
+      el.textContent = "engine: scripted baseline (no network weights loaded)";
+      return;
+    }
+    const k = info.search_k ? `${info.search_k} sampled worlds/decision` : "";
+    el.textContent = info.policy === "numpy-qnet+elimination-search"
+      ? `engine: numpy action-value network + elimination search — ${k}`
+      : `engine: ${info.policy}`;
+  } catch (err) {
+    /* the footer badge is decoration; a failure here must not break play */
+  }
+}
+showEngine();

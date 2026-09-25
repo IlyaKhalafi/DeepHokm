@@ -63,6 +63,7 @@
     <div class="trick-legend" id="trick-legend">
       <span class="key"><span class="dash"></span>led the trick</span>
       <span class="key"><span>▲</span>latest play</span>
+      <span class="key"><span class="count-key">8</span>cards left</span>
     </div>
 
     <div id="trump-picker" class="trump-picker hidden">
@@ -86,7 +87,9 @@
 </main>
 
 <footer>
-  <div>DeepHokm — reinforcement-learned Hokm. First team to 7 game points wins.</div>
+  <div>DeepHokm — Hokm played by a convolutional action-value network guiding a
+  determinized search. First team to 7 game points wins.</div>
+  <div id="engine" class="engine"></div>
 </footer>
 <script src="/static/app.js"></script>
 </body>

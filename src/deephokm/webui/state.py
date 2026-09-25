@@ -67,6 +67,13 @@ class GameStore:
                 seat=viewer_seat,
                 opponents=opponents,
             )
+            # Attach before reset: reset() already asks opponents to act when
+            # the viewer is not first to move, and an unattached policy would
+            # otherwise decide against the previous game's finished engine.
+            for opponent in opponents:
+                attach = getattr(opponent, "attach", None)
+                if attach is not None:
+                    attach(env.engine)
             env.reset(seed=seed)
             record = GameRecord(
                 id=game_id,

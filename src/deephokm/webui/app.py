@@ -20,6 +20,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from deephokm.rules.legality import NUM_ACTIONS
+from deephokm.webui.search_serving import (
+    SearchServedPolicy,
+    describe_policy,
+    load_shared_weights,
+    resolve_search_k,
+    resolve_weights_path,
+)
 from deephokm.webui.serving import ServedPolicy, build_opponents, resolve_model_path
 from deephokm.webui.state import GameStore, apply_human_action, public_state
 
@@ -39,8 +46,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     allow_random = os.environ.get("DEEPHOKM_ALLOW_RANDOM_MODEL", "") == "1"
     if served is None and not allow_random:
         raise RuntimeError(
-            f"no trained model at {resolve_model_path()}; set DEEPHOKM_MODEL or "
-            "set DEEPHOKM_ALLOW_RANDOM_MODEL=1 for random opponents"
+            f"no network weights at {resolve_weights_path()} and no checkpoint at "
+            f"{resolve_model_path()}; set DEEPHOKM_QNET or DEEPHOKM_MODEL, or set "
+            "DEEPHOKM_ALLOW_RANDOM_MODEL=1 for random opponents"
         )
     yield
 
@@ -61,26 +69,59 @@ class ActionRequest(BaseModel):
     action: int = Field(ge=0, le=NUM_ACTIONS - 1)
 
 
-def get_served() -> ServedPolicy | None:
-    """Load the served policy once per process (memoized, race-free)."""
+def get_served() -> SearchServedPolicy | ServedPolicy | None:
+    """Load the served policy once per process (memoized, race-free).
+
+    The numpy action-value network with search is preferred: it is the
+    strongest measured policy here (0.841 against a greedy opposing team),
+    while the reinforcement-learning checkpoint plateaued at the level of a
+    greedy clone. The checkpoint is kept as a fallback so an existing
+    deployment configured with DEEPHOKM_MODEL keeps working.
+    """
     with _model_lock:
         if not hasattr(app.state, "model") and not getattr(app.state, "model_disabled", False):
-            path = resolve_model_path()
-            if os.path.isfile(path):
-                app.state.model = ServedPolicy(path)
+            weights = resolve_weights_path()
+            checkpoint = resolve_model_path()
+            if os.path.isfile(weights):
+                # Cache the weights, not a policy: each game needs its own
+                # policy object because a policy holds the engine it decides
+                # for, and concurrent games would overwrite one another.
+                app.state.weights = load_shared_weights(weights)
+                app.state.model = SearchServedPolicy(
+                    app.state.weights, search_k=resolve_search_k()
+                )
+            elif os.path.isfile(checkpoint):
+                app.state.model = ServedPolicy(checkpoint)
             else:
                 app.state.model_disabled = True
         return getattr(app.state, "model", None)
 
 
+def _fresh_policy() -> SearchServedPolicy | ServedPolicy | None:
+    """A policy instance for one game.
+
+    The search policy is rebuilt per game so that each game owns the engine
+    reference it decides against; the weights behind it are shared. The
+    reinforcement-learning checkpoint is stateless across episodes, so the
+    memoized instance is reused as-is.
+    """
+    served = get_served()
+    if isinstance(served, SearchServedPolicy):
+        return SearchServedPolicy(app.state.weights, search_k=resolve_search_k())
+    return served
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     """Container healthcheck."""
-    return {
+    model = getattr(app.state, "model", None)
+    payload: dict[str, Any] = {
         "status": "ok",
-        "model_loaded": getattr(app.state, "model", None) is not None,
+        "model_loaded": model is not None,
         "games": len(_store._games),
     }
+    payload.update(describe_policy(model if isinstance(model, SearchServedPolicy) else None))
+    return payload
 
 
 @app.post("/api/games", status_code=201)
@@ -90,7 +131,7 @@ def create_game(request: CreateGameRequest) -> JSONResponse:
     record = _store.create(
         mode=request.mode,
         seed=seed,
-        opponents=build_opponents(get_served()),
+        opponents=build_opponents(_fresh_policy()),
     )
     return JSONResponse(public_state(record), status_code=201)
 

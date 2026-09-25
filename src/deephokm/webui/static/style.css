@@ -44,7 +44,19 @@ h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; color: var(--muted); t
 .status { font-size: 13px; color: var(--muted); }
 .status.error { color: var(--danger); }
 
-main { flex: 1; padding: 22px; max-width: 1100px; margin: 0 auto; width: 100%; }
+/* Centre the panel in the viewport. Left top-aligned, a finished match or the
+   setup card leaves most of the screen empty, which reads as a broken page
+   rather than a deliberate layout. */
+main {
+  flex: 1;
+  padding: 22px;
+  max-width: 1100px;
+  margin: 0 auto;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
 
 .panel {
   background: var(--panel);
@@ -163,7 +175,7 @@ button.ghost:disabled { color: var(--muted); border-color: var(--panel-edge); }
   display: flex;
   align-items: center;
   justify-content: center;
-  color: rgba(255, 255, 255, 0.4);
+  color: rgba(255, 255, 255, 0.62);
   font-size: 12px;
   letter-spacing: 2px;
   text-transform: uppercase;
@@ -327,6 +339,18 @@ footer {
 /* Trick markers */
 .card.tiny.led { box-shadow: 0 2px 5px rgba(0, 0, 0, 0.45), 0 3px 0 0 var(--accent); }
 .card.tiny.last-play { transform: translateY(-4px); }
+/* The legend promises a triangle for the latest play; render one rather than
+   relying on a 4px offset that is easy to miss. */
+.card.tiny.last-play { position: relative; }
+.play-caret {
+  position: absolute;
+  top: -13px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--accent, #4ade80);
+}
 .seat-count {
   color: var(--text);
   font-size: 12px;
@@ -363,3 +387,27 @@ footer {
   width: 14px; height: 3px; border-radius: 2px; background: var(--accent);
 }
 .trick-legend .lift { transform: translateY(-2px); }
+
+
+/* Engine badge in the footer: quiet, secondary to the game itself. */
+.engine {
+  margin-top: 0.35rem;
+  font-size: 0.82rem;
+  color: var(--muted, #8b9bb4);
+  letter-spacing: 0.01em;
+}
+
+
+/* Legend swatch for the per-seat count badge. A bare number beside a card
+   reads as a score; saying so once in the legend removes the ambiguity
+   without a tooltip the player has to hunt for. */
+.count-key {
+  display: inline-block;
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: 9px;
+  background: #222c37;
+  border: 1px solid #3a4855;
+  font-size: 11px;
+  text-align: center;
+}
