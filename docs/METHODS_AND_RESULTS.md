@@ -496,3 +496,40 @@ Revised, with 400 decisions/match measured rather than assumed:
 Current allocation: ten workers continue at K=3072 (their accumulated CPU is
 not discarded), and eight run at K=1536 with per-match checkpointing, so
 usable labels arrive in under two hours instead of most of a day.
+
+## 16. Better labels flip the lift positive
+
+Labels were regenerated from stronger teachers -- K=1536 (0.818 self-play win
+rate) and K=3072 (0.852) -- replacing the K=192 teacher (0.730) that every
+earlier student was distilled from. Paired on identical held-out seeds at
+verify-K 384:
+
+| student trained on | teacher | training decisions | matches | win rate | lift vs pure search |
+|---|---|---|---|---|---|
+| K=192 labels | 0.730 | 31k | 600 | 0.770 | -0.020 |
+| K=1536 + K=3072 labels | 0.818 / 0.852 | 14.5k | 89 (interim) | 0.798 | **+0.008** |
+
+The lift is positive for the first time at this verify-K, and it was obtained
+with **less than half** the training data. That isolates teacher quality as the
+cause: the only variable changed between the two rows is which search produced
+the labels, and the weaker-teacher student had more than twice as many of them.
+
+It confirms the constraint recorded in section 2 and restated in section 14 --
+a distilled student is bounded by its teacher, so a hybrid built on 0.730
+labels was never going to clear 0.80 no matter how the verifier was tuned. The
+hours spent sweeping verify-K and candidate counts were spent on the wrong
+variable.
+
+Two calibration details mattered alongside the teacher change:
+
+- The soft-target temperature must track the teacher's sampling error. It was
+  0.07 for K=192 (1/sqrt(192) = 0.072); at K=1536 and K=3072 the errors are
+  0.026 and 0.018, so holding 0.07 over-smoothed the targets and discarded the
+  precision the stronger teacher exists to provide. The matched arm led the
+  mismatched one at fewer than half the epochs.
+- Tie fraction fell from 0.318 to 0.289, so a stronger teacher also resolves
+  more decisions rather than only estimating the same ones more precisely.
+
+The interval at 89 matches is [0.714, 0.881] and does not establish anything
+against 0.80; the model is also visibly data-starved (train 0.93 against
+validation 0.62 on 7,100 decisive training decisions). Generation continues.
