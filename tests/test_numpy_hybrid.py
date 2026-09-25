@@ -155,3 +155,32 @@ def test_seats_see_only_their_own_hand() -> None:
         rows, cols = np.nonzero(planes[PLANE_SEEN])
         seen = {int(a) * 13 + int(b) for a, b in zip(rows, cols, strict=True)}
         assert seen <= own | set(engine.state.hands.played)
+
+
+def test_allocation_mode_scores_every_legal_action() -> None:
+    """Allocation must never drop an action from consideration.
+
+    Pruning to the network's favourites measurably lost to plain search once
+    the search was strong, because an action that is never scored can never be
+    chosen. The budget floor is what prevents that, so it is asserted directly.
+    """
+    th.manual_seed(0)
+    weights = export_weights(RankCNN(channels=TEST_CHANNELS).eval())
+    policy = NumpyHybridPolicy(weights, verify_samples=2, allocate=True, seed=0)
+
+    # A deliberately lopsided prior: the floor must still fund every action.
+    values = np.full(56, -5.0, dtype=np.float32)
+    legal = [0, 1, 2, 3, 4]
+    values[legal[0]] = 50.0
+    budget = policy._budget(values, legal, 40)
+
+    assert set(budget) == set(legal), "an action received no budget at all"
+    assert all(count >= 1 for count in budget.values())
+    assert budget[legal[0]] == max(budget.values()), "prior should still concentrate effort"
+
+
+def test_allocation_mode_plays_a_full_match_legally() -> None:
+    th.manual_seed(0)
+    weights = export_weights(RankCNN(channels=TEST_CHANNELS).eval())
+    policy = NumpyHybridPolicy(weights, verify_samples=2, allocate=True, seed=0)
+    assert len(play_match(policy, seed=29)) > 13

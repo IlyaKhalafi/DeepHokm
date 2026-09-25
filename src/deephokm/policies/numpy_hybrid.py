@@ -48,6 +48,10 @@ from deephokm.rules.state import NUM_SEATS, Phase, team_of
 DEFAULT_VERIFY_SAMPLES = 192
 DEFAULT_MAX_P_VALUE = 0.05
 DEFAULT_TOP_M = 3
+DEFAULT_TEMPERATURE = 0.1
+# Every legal action keeps at least this share of the mean per-action budget,
+# so a confident-but-wrong network can never starve the right move entirely.
+MIN_BUDGET_SHARE = 0.25
 
 
 class NumpyHybridPolicy:
@@ -70,6 +74,8 @@ class NumpyHybridPolicy:
         top_m: int = DEFAULT_TOP_M,
         max_p_value: float = DEFAULT_MAX_P_VALUE,
         seed: int = 0,
+        allocate: bool = False,
+        temperature: float = DEFAULT_TEMPERATURE,
     ) -> None:
         """Create the policy.
 
@@ -79,12 +85,18 @@ class NumpyHybridPolicy:
             top_m: Number of network proposals to consider.
             max_p_value: Sign-test threshold.
             seed: Seed for the world sampler.
+            allocate: Steer the rollout budget with the network instead of
+                pruning to its top ``top_m`` actions.
+            temperature: Softmax temperature for that split; lower
+                concentrates more budget on the network's favourites.
         """
         params = load_weights(weights) if isinstance(weights, Path) else weights
         self.net = NumpyQNet(params)
         self.verify_samples = verify_samples
         self.top_m = top_m
         self.max_p_value = max_p_value
+        self.allocate = allocate
+        self.temperature = temperature
         self.greedy = GreedyPolicy()
         self.voids = VoidTracker()
         self._rng = random.Random(seed)
@@ -98,7 +110,17 @@ class NumpyHybridPolicy:
         self.voids.observe(seat, card, led_suit)
 
     def decide(self, engine: HokmEngine) -> int:
-        """Choose the acting seat's action."""
+        """Choose the acting seat's action.
+
+        With ``allocate=True`` the network steers how the rollout budget is
+        divided across every legal action instead of pruning to its favourites.
+        Measured, top-M pruning *loses* to plain search once the search is
+        strong (lift +0.143 at K=48 decaying to -0.029 at K=384 on held-out
+        seeds): pruning sometimes removes the action full search would have
+        chosen, and no amount of extra search recovers an action that was never
+        scored. Allocation keeps every action in play, so a wrong prior costs
+        precision rather than the answer.
+        """
         seat = engine.current_seat()
         hands = engine.state.hands
         legal = engine.legal_actions(seat)
@@ -113,10 +135,72 @@ class NumpyHybridPolicy:
             return self.greedy.act(observation, mask)
 
         baseline = self.greedy.act(observation, mask)
+        if self.allocate:
+            return self._decide_by_allocation(
+                engine, seat, observation=observation, mask=mask,
+                legal=legal, baseline=baseline,
+            )
         for candidate in self._proposals(observation, mask, legal, baseline):
             if self._beats(engine, seat, candidate, baseline):
                 return candidate
         return baseline
+
+    def _budget(self, values: np.ndarray, legal: list[int], total: int) -> dict[int, int]:
+        """Split ``total`` rollouts across legal actions by the network's prior.
+
+        The split is a temperature-softened softmax over the network's values,
+        floored so no action drops below ``MIN_BUDGET_SHARE`` of an even split.
+        The floor is what makes this safe: the prior can concentrate effort but
+        never silently eliminate a candidate.
+        """
+        scores = values[legal].astype(np.float64)
+        weights = np.exp((scores - scores.max()) / max(self.temperature, 1e-6))
+        weights /= weights.sum()
+        floor = MIN_BUDGET_SHARE / len(legal)
+        weights = np.maximum(weights, floor)
+        weights /= weights.sum()
+        counts = np.maximum((weights * total).astype(int), 1)
+        return {int(a): int(c) for a, c in zip(legal, counts, strict=True)}
+
+    def _decide_by_allocation(
+        self,
+        engine: HokmEngine,
+        seat: int,
+        *,
+        observation: Observation,
+        mask: np.ndarray,
+        legal: list[int],
+        baseline: int,
+    ) -> int:
+        """Score every legal action, with the network deciding sample counts."""
+        planes, scalars = build_features(observation, mask)
+        values = self.net(planes[None], scalars[None])[0]
+        budget = self._budget(values, legal, self.verify_samples * len(legal))
+
+        team = team_of(seat)
+        hands = engine.state.hands
+        own_hand = hands.hands[seat]
+        seen = set(hands.played) | set(own_hand)
+        unseen = [card for card in range(NUM_CARDS) if card not in seen]
+        sizes = [len(hands.hands[s]) for s in range(NUM_SEATS)]
+        clone_rng = random.Random()
+
+        means: dict[int, float] = {}
+        for action, samples in budget.items():
+            total = 0.0
+            for _ in range(samples):
+                world = sample_determinized_hands(
+                    seat, own_hand, unseen, sizes, voids=self.voids.voids, rng=self._rng
+                )
+                total += self._value(
+                    engine, seat, action, team=team, world=world, clone_rng=clone_rng
+                )
+            means[action] = total / samples
+
+        best = max(means, key=lambda a: means[a])
+        # Ties go to the scripted baseline: deviating on a dead heat is how the
+        # earlier raw-argmax policy lost to greedy.
+        return baseline if means[best] <= means.get(baseline, -2.0) else best
 
     def _proposals(
         self,
