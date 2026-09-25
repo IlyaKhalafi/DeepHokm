@@ -706,3 +706,38 @@ bound is 0.803 at 200 matches and 0.807 at 240, so this design is the first in
 the family whose plausible outcome can actually demonstrate the target. If it
 lands at pure search's rate, the correct reading remains that the search
 supplies the strength and the network supplies ordering and speed.
+
+## 21. Registered elimination result
+
+| | value |
+|---|---|
+| policy | `NumpyHybridPolicy`, `eliminate=True`, verify-K 3072, M=3 |
+| weights | `qnet_numpy_full.npz`, provenance asserted against its checkpoint |
+| seeds | base 108,000,000, disjoint from all tuning |
+| matches | 239 of the registered 240 (one shard short) |
+| **win rate** | **0.8410, 95% CI [0.7946, 0.8874]** |
+| pure search at K=3072 | 0.852, lift -0.011 |
+| top-M pruning at K=3072 | 0.7561, stopped at n=82 |
+
+Elimination reaches parity with the full search it wraps, where pruning lost
+0.096 to it. The +8.5pp between the two is the measured cost of discarding
+actions before scoring them, and confirms the bound in section 19: the ceiling
+of this family is the search's own rate, reachable but not exceedable.
+
+**Verdict, both readings, neither collapsed into the other:**
+
+- Best estimate of the policy's win rate: **0.841, above the 0.80 target.**
+- Demonstrated at 95% confidence: **no.** The interval's lower bound is 0.7946.
+
+The registered test therefore does not certify the target, while its point
+estimate sits comfortably above it. At an 0.841 rate roughly 340 matches would
+put the lower bound past 0.80.
+
+### Extension
+
+An extension to 400 matches is run on the continuation of the same seed
+sequence, so the additional deals are new. It is reported separately from the
+registered 240 rather than merged into it: choosing to extend *after* seeing a
+near miss is not the same experiment as planning 400 from the start, and
+presenting the pooled figure as though it were pre-registered would overstate
+what the design supports.
