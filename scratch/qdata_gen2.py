@@ -18,7 +18,11 @@ from deephokm.rules.state import Phase
 
 w, W, N, K = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
 CHECKPOINT_EVERY = 5
-OUT = f"/home/ubuntu8/ilya/research/DeepHokm/scratch/q3072_{w}.pkl"
+# Optional 5th/6th args let a second pool run on disjoint seeds with its own
+# output prefix, so every core can generate without two jobs colliding.
+PREFIX = sys.argv[5] if len(sys.argv) > 5 else "q3072"
+SEED_BASE = int(sys.argv[6]) if len(sys.argv) > 6 else 28000000
+OUT = f"/home/ubuntu8/ilya/research/DeepHokm/scratch/{PREFIX}_{w}.pkl"
 
 
 def dump(records, done):
@@ -42,7 +46,7 @@ done = 0
 records = []  # (obs, mask, q_values list aligned to legal actions, legal actions)
 
 for i in range(w, N, W):
-    seed = 28000000 + i
+    seed = SEED_BASE + i
     team = i % 2
     search = LegalDepthSearchPolicy(n_samples=K, search_depth=2, seed=seed)
     engine.start_match(seed=seed)

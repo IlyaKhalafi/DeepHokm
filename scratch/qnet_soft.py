@@ -20,7 +20,7 @@ Three corrections to the MSE/argmax setup, each motivated by a measurement:
    is directly comparable to the measured teacher-vs-itself ceiling
    (0.7407 on decisive decisions).
 
-argv: arm epochs scale [tau] [augment]
+argv: arm epochs scale [tau] [augment] [data_glob]
 
 Setting augment=1 exploits suit exchangeability as DATA, not as an
 architectural constraint. The three non-trump suits can be relabelled without
@@ -50,6 +50,7 @@ TIE_EPS = 1e-9
 DEFAULT_TAU = 0.07
 ARG_TAU = 3      # argv index past which an explicit tau was given
 ARG_AUG = 4      # ... and an augmentation flag
+ARG_GLOB = 5     # ... and a dataset glob (comma-separated patterns allowed)
 TRUMP_PLANE = 3  # planes[:, TRUMP_PLANE] marks the trump suit's row
 
 
@@ -125,14 +126,15 @@ def main() -> None:
     arm, epochs, scale = argv[0], int(argv[1]), float(argv[2])
     tau = float(argv[ARG_TAU]) if len(argv) > ARG_TAU else DEFAULT_TAU
     augment = bool(int(argv[ARG_AUG])) if len(argv) > ARG_AUG else False
+    data_glob = argv[ARG_GLOB] if len(argv) > ARG_GLOB else "qdata_*.pkl"
 
-    planes, scalars, masks, targets, n_train = load_features()
+    planes, scalars, masks, targets, n_train = load_features(data_glob)
     n = planes.shape[0]
     opt, decisive = _optimal_sets(masks, targets)
     tr = np.flatnonzero(decisive[:n_train])
     va = np.flatnonzero(decisive[n_train:]) + n_train
     print(
-        f"arm={arm} scale={scale} tau={tau} epochs={epochs}\n"
+        f"arm={arm} scale={scale} tau={tau} epochs={epochs} data={data_glob}\n"
         f"decisive train={len(tr)}/{n_train}  val={len(va)}/{n - n_train}  "
         f"(dropped {1 - decisive.mean():.3f} of all decisions as all-tied)  "
         f"augment={augment}",
@@ -152,7 +154,10 @@ def main() -> None:
     def soft_target(t: th.Tensor, m: th.Tensor) -> th.Tensor:
         return th.softmax(t.masked_fill(m == 0, -1e9) / tau, dim=1)
 
-    ckpt = f"/home/ubuntu8/ilya/research/DeepHokm/checkpoints/soft_{arm}_x{scale:g}.pt"
+    tag = "".join(ch for ch in data_glob if ch.isalnum())[:24]
+    ckpt = (
+        f"/home/ubuntu8/ilya/research/DeepHokm/checkpoints/soft_{arm}_x{scale:g}_{tag}.pt"
+    )
     best = 0.0
     rng = np.random.default_rng(0)
     for ep in range(epochs):

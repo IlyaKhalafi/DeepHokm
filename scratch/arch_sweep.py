@@ -29,14 +29,25 @@ from torch import nn
 sys.path.insert(0, "/home/ubuntu8/ilya/research/DeepHokm/src")
 
 NUM_SUITS, NUM_RANKS, NUM_CARDS, NUM_ACTIONS = 4, 13, 52, 56
-CACHE = "/home/ubuntu8/ilya/research/DeepHokm/scratch/arch_features.npz"
+ROOT = "/home/ubuntu8/ilya/research/DeepHokm/scratch"
+DEFAULT_GLOB = "qdata_*.pkl"
+# Features are cached per dataset: a single cache path silently served the old
+# K=192 features to a run that asked for K=3072 labels.
+def cache_path(pattern: str) -> str:
+    slug = pattern.replace("*", "x").replace(".pkl", "").replace(",", "_")
+    return f"{ROOT}/features_{slug}.npz"
 
 
-def build_features():
-    files = sorted(
-        glob.glob("/home/ubuntu8/ilya/research/DeepHokm/scratch/qdata_*.pkl"),
-        key=lambda p: int(p.split("_")[-1].split(".")[0]),
-    )
+def build_features(pattern: str = DEFAULT_GLOB):
+    """Build features from every shard matching ``pattern`` (comma-separated ok)."""
+    files: list[str] = []
+    for part in pattern.split(","):
+        files.extend(sorted(
+            glob.glob(f"{ROOT}/{part.strip()}"),
+            key=lambda p: int(p.split("_")[-1].split(".")[0]),
+        ))
+    if not files:
+        raise FileNotFoundError(f"no shards matched {pattern!r} under {ROOT}")
     data = []
     for f in files:
         with open(f, "rb") as fh:
@@ -46,7 +57,10 @@ def build_features():
     qvals = [q for d in data for q in d["qvals"]]
     legals = [lg for d in data for lg in d["legals"]]
     n = len(qvals)
-    n_train = sum(len(d["qvals"]) for d in data[:6])
+    # Hold out the last quarter of shards. Shards are disjoint match sets, so
+    # this keeps every decision from one deal on the same side of the split.
+    n_hold = max(1, len(data) // 4)
+    n_train = sum(len(d["qvals"]) for d in data[: len(data) - n_hold])
 
     planes = np.zeros((n, 14, NUM_SUITS, NUM_RANKS), dtype=np.float32)
     for i, key in enumerate(("hand", "seen", "trick")):
@@ -92,13 +106,15 @@ def build_features():
     return planes, scalars, masks, targets, n_train
 
 
-def load_features():
-    if os.path.exists(CACHE):
-        z = np.load(CACHE)
+def load_features(pattern: str = DEFAULT_GLOB):
+    """Cached features for ``pattern``; the cache is keyed by the pattern."""
+    cache = cache_path(pattern)
+    if os.path.exists(cache):
+        z = np.load(cache)
         return z["planes"], z["scalars"], z["masks"], z["targets"], int(z["n_train"])
-    planes, scalars, masks, targets, n_train = build_features()
+    planes, scalars, masks, targets, n_train = build_features(pattern)
     np.savez_compressed(
-        CACHE, planes=planes, scalars=scalars, masks=masks, targets=targets,
+        cache, planes=planes, scalars=scalars, masks=masks, targets=targets,
         n_train=n_train,
     )
     return planes, scalars, masks, targets, n_train
