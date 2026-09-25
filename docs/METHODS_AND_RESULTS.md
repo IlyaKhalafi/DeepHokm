@@ -406,3 +406,57 @@ softmax-weighted with a floor of a quarter of an even split. At matched total
 budget this cannot lose to uniform allocation except through noise, because the
 uniform split is inside its reachable set. The floor is the safety property and
 is asserted against a deliberately lopsided prior in the test suite.
+
+## 14. Allocation mode failed, and why the reasoning behind it was wrong
+
+Replacing top-M pruning with prior-weighted budget allocation was predicted to
+be safe: every action stays in the search, the uniform split is inside the
+reachable set, so at matched budget it should not lose to plain search except
+through noise. Measured on the same held-out seeds and the same budget:
+
+| policy | matches | win rate | 95% CI |
+|---|---|---|---|
+| allocation (every action scored) | 68 | 0.647 | [0.533, 0.761] |
+| top-M pruning, M=3 | 600 | 0.770 | [0.736, 0.804] |
+| pure search, no network | -- | 0.790 | -- |
+
+Allocation is 0.123 worse than pruning and 0.143 worse than no network at all.
+The prediction was wrong for two reasons, both of which are properties of the
+comparison rather than of the allocation:
+
+1. **The significance gate was dropped.** Allocation takes the argmax of
+   per-action means. Section 5 already recorded what that costs: a raw argmax-Q
+   policy scores 0.265, because without a gate the policy deviates from greedy
+   on noise. Re-introducing an ungated argmax re-introduced the failure.
+2. **The comparisons became unpaired.** The top-M verifier scores the candidate
+   and greedy's action *in the same sampled world*, so world-level variance
+   cancels and the sign test sees only the difference that matters. Allocation
+   gives each action its own independent worlds, so comparing means across
+   actions carries the full variance of the world sampling. At ~384 samples per
+   action that is enough noise to swamp the real differences.
+
+The fix for allocation would be common random numbers -- score every funded
+action inside each sampled world, and keep a paired gate against greedy -- which
+converges to exactly what `LegalDepthSearchPolicy` already does, with unequal
+sample counts as the only difference. There is no cheap win here.
+
+### Consolidated position on the network's value
+
+| verify-K | hybrid (top-M) | pure search | lift |
+|---|---|---|---|
+| 48 | 0.713 | 0.570 | **+0.143** |
+| 192 | 0.790 | 0.730 | +0.060 |
+| 384 (held out) | 0.770 | 0.790 | **-0.020** |
+| 1536 | 0.813 | 0.818 | -0.005 |
+
+The network helps only where the search is starved. At K=48 it converts a
+0.570 search into 0.713 at a tenth of the rollouts, which is a genuine
+efficiency result. It does not raise the ceiling: past roughly K=200 it stops
+adding and begins subtracting.
+
+Reaching 0.80 therefore requires a prior good enough that pruning does not
+discard the right action, and that means a better teacher. The K=192 teacher
+wins 0.730 of its own matches, so a student of it was never going to carry a
+hybrid past 0.80 -- the constraint recorded in section 2 ("cloning is a floor,
+not a lift") applied to this plan the whole time and was not acted on until the
+measurements forced it.
