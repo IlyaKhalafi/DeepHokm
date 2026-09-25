@@ -8,7 +8,10 @@ from the module that actually ships, loading the actual .npz weights.
 Seeds are disjoint from every earlier evaluation: reusing seeds that guided the
 choice of checkpoint and verify-K would report a tuned number as a held-out one.
 
-argv: shard n_shards matches verify_k top_m weights_npz [seed_base]
+argv: shard n_shards matches verify_k top_m weights_npz [seed_base] [mode] [start]
+
+``mode`` is 0 for top-M pruning, 1 for budget allocation, 2 for sequential
+elimination.
 """
 import sys
 from pathlib import Path
@@ -22,7 +25,10 @@ from deephokm.rules.engine import HokmEngine  # noqa: E402
 from deephokm.rules.state import Phase  # noqa: E402
 
 DEFAULT_SEED_BASE = 77_000_000  # disjoint from all tuning evaluations
-ARG_SEED_BASE = 6  # argv index past which an explicit base was given
+ARG_SEED_BASE = 6   # argv index past which an explicit base was given
+ARG_MODE = 7        # ... and a decision-mode selector
+ARG_START = 8       # ... and a first match index, for extending a finished run
+MODE_ALLOCATE, MODE_ELIMINATE = 1, 2
 
 shard, n_shards, matches, verify_k, top_m = (int(x) for x in sys.argv[1:6])
 weights = Path(sys.argv[6])
@@ -31,16 +37,21 @@ seed_base = (
     if len(sys.argv) > ARG_SEED_BASE + 1
     else DEFAULT_SEED_BASE
 )
+mode = int(sys.argv[ARG_MODE + 1]) if len(sys.argv) > ARG_MODE + 1 else 0
+allocate = mode == MODE_ALLOCATE
+eliminate = mode == MODE_ELIMINATE
 
 greedy = GreedyPolicy()
 wins = 0
 played = 0
 
-for index in range(shard, matches, n_shards):
+start = int(sys.argv[ARG_START + 1]) if len(sys.argv) > ARG_START + 1 else 0
+for index in range(start + shard, matches, n_shards):
     seed = seed_base + index
     team = index % 2
     policy = NumpyHybridPolicy(
-        weights, verify_samples=verify_k, top_m=top_m, seed=seed
+        weights, verify_samples=verify_k, top_m=top_m, seed=seed,
+        allocate=allocate, eliminate=eliminate
     )
     engine = HokmEngine()
     engine.start_match(seed=seed)
@@ -69,6 +80,7 @@ for index in range(shard, matches, n_shards):
     wins += int(engine.state.winner == team)
     played += 1  # noqa: SIM113 (the loop strides shards, not 0..n)
     print(
-        f"shard {shard} K={verify_k} M={top_m}: {wins}/{played} = {wins / played:.3f}",
+        f"shard {shard} K={verify_k} M={top_m} mode={mode}: "
+        f"{wins}/{played} = {wins / played:.3f}",
         flush=True,
     )
