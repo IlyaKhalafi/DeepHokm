@@ -666,3 +666,43 @@ What the network does supply, measured rather than asserted: at K=48 it turns a
 0.570 search into 0.713, a 14pp gain at 1/64 of the rollout budget of K=3072,
 with a 30 ms numpy forward pass and no PyTorch at play time. That is an
 efficiency result, and it is the honest headline for the network itself.
+
+## 20. Registered top-M evaluation stopped early, and the elimination test
+
+The registered evaluation of top-M pruning at verify-K 3072 was stopped after 82
+of its 240 matches.
+
+| | value |
+|---|---|
+| win rate at the stop | 62/82 = 0.7561, 95% CI [0.663, 0.849] |
+| pure search at K=3072 | 0.852 |
+| lift | -0.096 |
+
+It is reported here as an early-stopped interim and is never described as the
+registered 240-match result. The reason for stopping is that the outcome was
+already determined by the bound in section 19 rather than by sampling: top-M
+maximises over a subset of what pure search considers, so it cannot exceed
+0.852, and the measurement matched that at 82 matches with the largest deficit
+of any verify-K tested. Fifteen further hours would have narrowed an interval
+around a predicted failure.
+
+Stopping a test that is failing does not flatter any claim -- the hazard in
+optional stopping is halting when the numbers are favourable -- so the compute
+was redirected to the design that the bound says can actually work.
+
+### Registered elimination evaluation
+
+- policy: `NumpyHybridPolicy` with `eliminate=True`, verify-K 3072
+- every legal action is scored in every sampled world, survivors are pruned only
+  after trailing the leader by more than two standard errors of the paired
+  difference, and the leader and greedy's action are never removed
+- weights: `qnet_numpy_full.npz`, provenance asserted against its checkpoint
+- 240 matches, seed base 108,000,000 (shared with the stopped run, so the two
+  are paired on the matches both played)
+- success: the lower bound of the 95% interval exceeds 0.80
+
+Power, stated in advance: if elimination matches pure search at 0.852, the lower
+bound is 0.803 at 200 matches and 0.807 at 240, so this design is the first in
+the family whose plausible outcome can actually demonstrate the target. If it
+lands at pure search's rate, the correct reading remains that the search
+supplies the strength and the network supplies ordering and speed.
