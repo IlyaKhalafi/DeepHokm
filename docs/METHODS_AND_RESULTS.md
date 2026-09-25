@@ -621,3 +621,48 @@ decision against the 1 s budget, and a provenance assertion that every tensor
 in the `.npz` matches the checkpoint it names. That assertion now blocks the
 evaluation rather than being a step to remember, after an earlier rename left
 the wrong weights behind a confident filename.
+
+## 19. Why the hybrid cannot beat the search it wraps
+
+Every verify-K sweep in this work is explained by one structural fact that
+should have been derived before any of them were run.
+
+The hybrid's verifier *is* the pure search. At verify-K it draws the same
+determinized worlds, runs the same depth-limited evaluation, and applies the
+same sign test against greedy. The only thing the network changes is which
+candidate actions reach that machinery. So the hybrid evaluates a **subset** of
+what pure search at the same K evaluates, and a subset cannot contain a better
+maximum than the whole.
+
+That gives an upper bound: at matched verify-K, hybrid <= pure search, with
+equality when the network's candidate set happens to contain the search's
+choice.
+
+The measured lift is positive at small K anyway, and the reason is a second
+effect running the other way. At K=48 the sign test is noisy enough that pure
+search accepts deviations from greedy that are sampling artifacts; restricting
+the candidates to the network's favourites removes most of those false
+positives. The network is not finding better actions there -- it is suppressing
+the search's own mistakes.
+
+| verify-K | hybrid | pure search | lift | dominant effect |
+|---|---|---|---|---|
+| 48 | 0.713 | 0.570 | +0.143 | noise suppression wins |
+| 192 | 0.790 | 0.730 | +0.060 | noise suppression wins |
+| 384 | 0.792 | 0.790 | +0.002 | the two effects cancel |
+| 1536 | 0.813 | 0.818 | -0.005 | candidate loss wins |
+
+The crossover near K=300 is where the search stops making enough noise-driven
+mistakes for the network's filtering to pay for the candidates it discards.
+
+The consequence for the target is not negotiable by tuning. The highest win rate
+reachable by any policy in this family is the pure search's rate at the largest
+affordable K -- 0.852 at K=3072 -- and it is reached *without* the network. A
+hybrid at that K performs at or just below it. So "a Q-network that wins more
+than 80%" is attainable only in the sense that a policy containing the network
+clears 80% while the search supplies the strength.
+
+What the network does supply, measured rather than asserted: at K=48 it turns a
+0.570 search into 0.713, a 14pp gain at 1/64 of the rollout budget of K=3072,
+with a 30 ms numpy forward pass and no PyTorch at play time. That is an
+efficiency result, and it is the honest headline for the network itself.
