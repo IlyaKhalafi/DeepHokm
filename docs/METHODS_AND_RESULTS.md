@@ -367,3 +367,42 @@ that; the nomination itself has to get better, which means better labels. The
 K=192 teacher wins 0.730 of its own matches, so a student distilled from it
 cannot be expected to carry a hybrid past 0.80 on its own -- the K=3072 teacher
 (0.852) is the one whose decisions are worth imitating.
+
+## 13. Registered result: the top-M hybrid does not reach 80%
+
+The second registered confirmation completed at its full pre-specified size.
+
+| | value |
+|---|---|
+| policy | `NumpyHybridPolicy`, top-M nomination, M=3 |
+| weights | `checkpoints/qnet_numpy.npz` (RankCNN 3x, 6.4M parameters) |
+| verify-K | 384 |
+| matches | 600, seed base 91,000,000, disjoint from all tuning |
+| **win rate** | **0.7700, 95% CI [0.736, 0.804]** |
+| pure search at K=384 | 0.790 |
+| lift | **-0.020** |
+
+The interval's upper bound is 0.804, so the result is not merely unproven
+against the 0.80 target -- it is very close to excluding it. The lift is
+negative: at this search strength the network makes the policy *worse* than
+running the same search with no network at all.
+
+The paired diagnostic rules out an implementation fault. On identical seeds the
+shipped policy scored 0.8333 and the research harness 0.8390, a difference of
+0.006, so the two code paths agree and the 7pp gap between tuning and held-out
+seeds is selection, not a defect.
+
+### Why pruning was the wrong mechanism
+
+Top-M nomination removes actions from the search. An action that is never
+scored can never be chosen, so when the network's ranking is wrong the search
+has no way to recover -- and the stronger the search, the more often it would
+have found the action the network discarded. That is exactly the measured
+pattern (+0.143, +0.060, +0.049, -0.020, -0.005 as K rises).
+
+`allocate=True` replaces pruning with budget allocation: every legal action is
+scored, and the network only decides how many of the rollouts each one gets,
+softmax-weighted with a floor of a quarter of an even split. At matched total
+budget this cannot lose to uniform allocation except through noise, because the
+uniform split is inside its reachable set. The floor is the safety property and
+is asserted against a deliberately lopsided prior in the test suite.
