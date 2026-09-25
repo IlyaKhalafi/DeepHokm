@@ -497,7 +497,7 @@ Current allocation: ten workers continue at K=3072 (their accumulated CPU is
 not discarded), and eight run at K=1536 with per-match checkpointing, so
 usable labels arrive in under two hours instead of most of a day.
 
-## 16. Better labels flip the lift positive
+## 16. Better labels help, but less than the first 89 matches suggested
 
 Labels were regenerated from stronger teachers -- K=1536 (0.818 self-play win
 rate) and K=3072 (0.852) -- replacing the K=192 teacher (0.730) that every
@@ -507,12 +507,26 @@ verify-K 384:
 | student trained on | teacher | training decisions | matches | win rate | lift vs pure search |
 |---|---|---|---|---|---|
 | K=192 labels | 0.730 | 31k | 600 | 0.770 | -0.020 |
-| K=1536 + K=3072 labels | 0.818 / 0.852 | 14.5k | 89 (interim) | 0.798 | **+0.008** |
+| K=1536 + K=3072 labels | 0.818 / 0.852 | 14.5k | 89 | 0.798 | +0.008 |
+| K=1536 + K=3072 labels | 0.818 / 0.852 | 14.5k | **175** | **0.783** | **-0.007** |
 
-The lift is positive for the first time at this verify-K, and it was obtained
-with **less than half** the training data. That isolates teacher quality as the
-cause: the only variable changed between the two rows is which search produced
-the labels, and the weaker-teacher student had more than twice as many of them.
+**Correction.** At 89 matches this read 0.798 with a positive lift, and was
+recorded here under the heading "better labels flip the lift positive". At 175
+matches it reads 0.783 and the lift is back to roughly zero. The heading was
+wrong and has been changed; the original claim is left visible above rather than
+deleted.
+
+What survives the larger sample is smaller but still real: the new student beats
+the old one by about 1.3pp (0.783 against 0.770) on identical seeds while
+training on less than half the decisions. Teacher quality does help. It does not
+by itself turn a negative lift positive at this verify-K.
+
+This is the fourth time in this work that an interim figure looked like a result
+and shrank with more data (0.814 to 0.790 at K=192; 0.839 to 0.770 from tuning
+to held-out seeds; 0.8125 at n=48 with a negative lift; and now 0.798 to 0.783).
+The pattern is consistent enough to treat any sample under a few hundred matches
+as uninformative about a 1-3pp effect, and to distrust a conclusion drawn the
+moment it first looks favourable.
 
 It confirms the constraint recorded in section 2 and restated in section 14 --
 a distilled student is bounded by its teacher, so a hybrid built on 0.730
