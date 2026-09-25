@@ -508,7 +508,8 @@ verify-K 384:
 |---|---|---|---|---|---|
 | K=192 labels | 0.730 | 31k | 600 | 0.770 | -0.020 |
 | K=1536 + K=3072 labels | 0.818 / 0.852 | 14.5k | 89 | 0.798 | +0.008 |
-| K=1536 + K=3072 labels | 0.818 / 0.852 | 14.5k | **175** | **0.783** | **-0.007** |
+| K=1536 + K=3072 labels | 0.818 / 0.852 | 14.5k | 175 | 0.783 | -0.007 |
+| K=1536 + K=3072 labels | 0.818 / 0.852 | 14.5k | **240 (final)** | **0.792** | **+0.002** |
 
 **Correction.** At 89 matches this read 0.798 with a positive lift, and was
 recorded here under the heading "better labels flip the lift positive". At 175
@@ -516,10 +517,11 @@ matches it reads 0.783 and the lift is back to roughly zero. The heading was
 wrong and has been changed; the original claim is left visible above rather than
 deleted.
 
-What survives the larger sample is smaller but still real: the new student beats
-the old one by about 1.3pp (0.783 against 0.770) on identical seeds while
-training on less than half the decisions. Teacher quality does help. It does not
-by itself turn a negative lift positive at this verify-K.
+At the full 240 matches the figure is 0.792 with a lift of +0.002 -- parity with
+plain search, not an improvement on it. What survives is that the new student
+beats the old one by 2.2pp (0.792 against 0.770) on identical seeds while
+training on less than half the decisions, so teacher quality does help; it
+moves the hybrid from losing to the search to matching it, and no further.
 
 This is the fourth time in this work that an interim figure looked like a result
 and shrank with more data (0.814 to 0.790 at K=192; 0.839 to 0.770 from tuning
