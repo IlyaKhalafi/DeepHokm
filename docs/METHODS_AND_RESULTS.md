@@ -547,3 +547,52 @@ Two calibration details mattered alongside the teacher change:
 The interval at 89 matches is [0.714, 0.881] and does not establish anything
 against 0.80; the model is also visibly data-starved (train 0.93 against
 validation 0.62 on 7,100 decisive training decisions). Generation continues.
+
+## 17. What it would take to demonstrate 80%, and the final registered plan
+
+Demonstrating the target is a statistical problem as much as a modelling one.
+For a 95% interval to exclude 0.80 from below:
+
+| true win rate | matches required |
+|---|---|
+| 0.80 | more than 6000 |
+| 0.82 | 1420 |
+| 0.84 | 340 |
+| 0.85 | 200 |
+| 0.86 | 140 |
+
+A policy that merely reaches 0.80 can never be *shown* to at any affordable
+sample size. The sample requirement collapses as the true rate rises, so the
+efficient move is to evaluate wherever the policy is strongest rather than
+wherever it is cheapest per match.
+
+Evaluation cost, at the measured ~200 decisions per match and 6K rollouts per
+decision (M=3 over ~6 legal actions):
+
+| verify-K | hours per match | n=240 on 18 cores | pure-search rate at that K |
+|---|---|---|---|
+| 384 | 0.43 | 6 h | 0.790 |
+| 1536 | 0.86 | 11 h | 0.818 |
+| 3072 | 1.73 | 23 h | 0.852 |
+
+K=384 is cheap per match but its rate (~0.79) would need thousands of matches.
+K=3072 costs four times as much per match and needs only ~200, so it is both
+the strongest and the cheapest place to run the decisive test.
+
+### Registered final evaluation
+
+- policy: `NumpyHybridPolicy`, top-M with M=3, verify-K 3072
+- weights: the RankCNN trained on the full K=1536 + K=3072 label set with the
+  temperature matched to those teachers, converted to `.npz` and verified
+  tensor-by-tensor against its source checkpoint
+- 240 matches, seed base 108,000,000, disjoint from every previous run
+- success: the lower bound of the 95% interval exceeds 0.80
+- reported regardless of outcome, alongside the pure-search rate at the same K
+  so the network's contribution is separable from the search's
+
+Stated in advance: pure search alone scores 0.852 at this K, so a hybrid result
+near 0.85 would demonstrate a policy that clears 80% *containing* the network,
+not a network that clears 80% by itself. The network's measured contribution is
+efficiency at low search budgets (0.713 against search's 0.570 at K=48) and
+parity at higher ones; it does not raise the ceiling. Any headline number will
+say so.
