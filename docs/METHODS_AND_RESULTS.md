@@ -598,3 +598,26 @@ not a network that clears 80% by itself. The network's measured contribution is
 efficiency at low search budgets (0.713 against search's 0.570 at K=48) and
 parity at higher ones; it does not raise the ceiling. Any headline number will
 say so.
+
+## 18. Final model: full label set
+
+Trained on all 47,599 decisions from the stronger teachers (K=1536 and K=3072),
+with the soft-target temperature at 0.02 to match their sampling error.
+
+| labels | teacher | decisive train | val optimal-set | random floor | lift over floor |
+|---|---|---|---|---|---|
+| K=192, 31k | 0.730 | 16,042 | 0.6461 | 0.3560 | +0.290 |
+| new, 14.5k | 0.818 / 0.852 | 7,100 | 0.6227 | 0.3269 | +0.296 |
+| **new, 47.6k** | 0.818 / 0.852 | 22,062 | **0.6617** | 0.3269 | **+0.335** |
+
+Both interventions compounded: the stronger teacher and roughly three times the
+decisive training data. The train/validation gap narrowed from 0.93/0.62 to
+0.93/0.64, so the model is still capacity-rich for the data but less so than
+before.
+
+Deployment gates re-measured on these exact weights: 1.9e-06 maximum absolute
+difference against torch, identical argmax on every state tested, 30.0 ms per
+decision against the 1 s budget, and a provenance assertion that every tensor
+in the `.npz` matches the checkpoint it names. That assertion now blocks the
+evaluation rather than being a step to remember, after an earlier rename left
+the wrong weights behind a confident filename.
