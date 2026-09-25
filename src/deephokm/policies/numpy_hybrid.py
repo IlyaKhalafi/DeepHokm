@@ -308,7 +308,10 @@ class NumpyHybridPolicy:
         per_round = max(1, self.verify_samples // ELIMINATION_ROUNDS)
         totals = dict.fromkeys(survivors, 0.0)
         squares = dict.fromkeys(survivors, 0.0)
-        drawn = 0
+        # Per-action sample counts, because an eliminated action stops
+        # accumulating: comparing raw totals would rank actions by how long they
+        # survived rather than by how well they scored.
+        counts = dict.fromkeys(survivors, 0)
         for _ in range(ELIMINATION_ROUNDS):
             if len(survivors) <= 1:
                 break
@@ -322,10 +325,10 @@ class NumpyHybridPolicy:
                     )
                     totals[action] += value
                     squares[action] += value * value
-            drawn += per_round
-            survivors = self._survivors(survivors, totals, squares, drawn, baseline)
+                    counts[action] += 1
+            survivors = self._survivors(survivors, totals, squares, counts, baseline)
 
-        best = max(survivors, key=lambda a: totals[a])
+        best = max(survivors, key=lambda a: totals[a] / counts[a])
         if best == baseline:
             return baseline
         return best if self._beats(engine, seat, best, baseline) else baseline
@@ -335,18 +338,25 @@ class NumpyHybridPolicy:
         actions: list[int],
         totals: dict[int, float],
         squares: dict[int, float],
-        drawn: int,
+        counts: dict[int, int],
         baseline: int,
     ) -> list[int]:
-        """Keep the leader, greedy's action, and everything not yet ruled out."""
-        means = {a: totals[a] / drawn for a in actions}
-        leader = max(actions, key=lambda a: means[a])
-        if drawn < MIN_DRAWS_TO_ELIMINATE:
+        """Keep the leader, greedy's action, and everything not yet ruled out.
+
+        Each action is judged on its own mean over its own sample count, so an
+        action that has been measured fewer times is not penalised for it.
+        """
+        means = {a: totals[a] / counts[a] for a in actions if counts[a] > 0}
+        if not means:
+            return actions
+        leader = max(means, key=lambda a: means[a])
+        if min(counts[a] for a in actions) < MIN_DRAWS_TO_ELIMINATE:
             return actions
         kept = []
         for a in actions:
-            variance = max(squares[a] / drawn - means[a] ** 2, 0.0)
-            stderr = (variance / drawn) ** 0.5
+            n = counts[a]
+            variance = max(squares[a] / n - means[a] ** 2, 0.0)
+            stderr = (variance / n) ** 0.5
             gap = means[leader] - means[a]
             if a in (leader, baseline) or gap <= ELIMINATION_Z * max(stderr, 1e-9):
                 kept.append(a)

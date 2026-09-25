@@ -203,7 +203,8 @@ def test_elimination_never_drops_the_leader_or_greedy() -> None:
     totals = {0: 9.0, 1: -8.0, 2: -9.0, 3: -9.5}
     squares = {a: abs(v) for a, v in totals.items()}
 
-    kept = policy._survivors(actions, totals, squares, drawn, baseline=3)
+    counts = dict.fromkeys(actions, drawn)
+    kept = policy._survivors(actions, totals, squares, counts, baseline=3)
     assert 0 in kept, "the leader was eliminated"
     assert 3 in kept, "greedy's action was eliminated"
     assert len(kept) < len(actions), "nothing was eliminated despite decisive gaps"
@@ -219,8 +220,30 @@ def test_elimination_keeps_contenders_that_are_not_ruled_out() -> None:
     drawn = 10
     totals = {0: 1.0, 1: 0.9, 2: 0.8}       # nearly tied
     squares = {0: 10.0, 1: 10.0, 2: 10.0}   # high variance -> nothing resolvable
-    kept = policy._survivors(actions, totals, squares, drawn, baseline=0)
+    counts = dict.fromkeys(actions, drawn)
+    kept = policy._survivors(actions, totals, squares, counts, baseline=0)
     assert set(kept) == set(actions), "a contender was eliminated on noise"
+
+
+def test_elimination_ranks_by_mean_not_by_total() -> None:
+    """An action measured fewer times must not be penalised for that.
+
+    Eliminated actions stop accumulating, so ranking by raw total would order
+    actions by how long they survived rather than how well they scored.
+    """
+    th.manual_seed(0)
+    policy = NumpyHybridPolicy(
+        export_weights(RankCNN(channels=TEST_CHANNELS).eval()), verify_samples=8, eliminate=True
+    )
+    actions = [0, 1]
+    # Action 1 has the better mean (0.9 vs 0.5) on a quarter of the samples.
+    totals = {0: 20.0, 1: 9.0}
+    counts = {0: 40, 1: 10}
+    squares = {0: 20.0, 1: 9.0}
+    means = {a: totals[a] / counts[a] for a in actions}
+    assert means[1] > means[0]
+    kept = policy._survivors(actions, totals, squares, counts, baseline=0)
+    assert 1 in kept, "the better mean was eliminated because it had fewer samples"
 
 
 def test_elimination_mode_plays_a_full_match_legally() -> None:
