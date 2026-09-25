@@ -154,9 +154,13 @@ def main() -> None:
     def soft_target(t: th.Tensor, m: th.Tensor) -> th.Tensor:
         return th.softmax(t.masked_fill(m == 0, -1e9) / tau, dim=1)
 
+    # Every hyperparameter that distinguishes an arm belongs in the filename.
+    # Keying on the dataset alone let two concurrent tau arms write the same
+    # file, leaving a checkpoint whose provenance could not be established.
     tag = "".join(ch for ch in data_glob if ch.isalnum())[:24]
     ckpt = (
-        f"/home/ubuntu8/ilya/research/DeepHokm/checkpoints/soft_{arm}_x{scale:g}_{tag}.pt"
+        f"/home/ubuntu8/ilya/research/DeepHokm/checkpoints/"
+        f"soft_{arm}_x{scale:g}_tau{tau:g}_aug{int(augment)}_{tag}.pt"
     )
     best = 0.0
     rng = np.random.default_rng(0)
