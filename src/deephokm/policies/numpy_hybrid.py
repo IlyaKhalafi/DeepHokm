@@ -49,6 +49,11 @@ DEFAULT_VERIFY_SAMPLES = 192
 DEFAULT_MAX_P_VALUE = 0.05
 DEFAULT_TOP_M = 3
 DEFAULT_TEMPERATURE = 0.1
+# Sequential elimination: worlds are drawn in rounds, every surviving action is
+# scored in each world, and actions far enough behind the leader are dropped.
+ELIMINATION_ROUNDS = 6
+ELIMINATION_Z = 2.0  # drop an action this many standard errors behind the best
+MIN_DRAWS_TO_ELIMINATE = 2  # a variance estimate needs at least two samples
 # Every legal action keeps at least this share of the mean per-action budget,
 # so a confident-but-wrong network can never starve the right move entirely.
 MIN_BUDGET_SHARE = 0.25
@@ -75,6 +80,7 @@ class NumpyHybridPolicy:
         max_p_value: float = DEFAULT_MAX_P_VALUE,
         seed: int = 0,
         allocate: bool = False,
+        eliminate: bool = False,
         temperature: float = DEFAULT_TEMPERATURE,
     ) -> None:
         """Create the policy.
@@ -87,6 +93,10 @@ class NumpyHybridPolicy:
             seed: Seed for the world sampler.
             allocate: Steer the rollout budget with the network instead of
                 pruning to its top ``top_m`` actions.
+            eliminate: Score every action in every sampled world and drop the
+                ones that fall statistically behind, using the network only to
+                order the field. Unlike pruning this cannot discard the action
+                full search would choose before it has been scored.
             temperature: Softmax temperature for that split; lower
                 concentrates more budget on the network's favourites.
         """
@@ -96,6 +106,7 @@ class NumpyHybridPolicy:
         self.top_m = top_m
         self.max_p_value = max_p_value
         self.allocate = allocate
+        self.eliminate = eliminate
         self.temperature = temperature
         self.greedy = GreedyPolicy()
         self.voids = VoidTracker()
@@ -135,6 +146,11 @@ class NumpyHybridPolicy:
             return self.greedy.act(observation, mask)
 
         baseline = self.greedy.act(observation, mask)
+        if self.eliminate:
+            return self._decide_by_elimination(
+                engine, seat, observation=observation, mask=mask,
+                legal=legal, baseline=baseline,
+            )
         if self.allocate:
             return self._decide_by_allocation(
                 engine, seat, observation=observation, mask=mask,
@@ -243,6 +259,98 @@ class NumpyHybridPolicy:
                 wins_baseline += 1
         discordant = wins_candidate + wins_baseline
         return _sign_test_p_value(wins_candidate, discordant) <= self.max_p_value
+
+
+    def _decide_by_elimination(
+        self,
+        engine: HokmEngine,
+        seat: int,
+        *,
+        observation: Observation,
+        mask: np.ndarray,
+        legal: list[int],
+        baseline: int,
+    ) -> int:
+        """Full-search quality at lower cost, via sequential elimination.
+
+        Pruning to the network's favourites cannot beat plain search, because
+        it maximises over a subset of what plain search considers: measured
+        lift decays from +0.143 at K=48 to -0.060 at K=3072. This keeps every
+        action in the field and removes only those the evidence has already
+        ruled out.
+
+        Each round draws worlds and scores *every survivor in the same world*,
+        so world-level variance cancels the way the paired sign test does -- the
+        mistake that sank the allocation variant was comparing actions across
+        different worlds. After each round an action is dropped when it trails
+        the leader by more than ``ELIMINATION_Z`` standard errors of the paired
+        difference. The network supplies the initial ordering, which decides
+        only who is measured first, never who is excluded.
+
+        Greedy's action is never eliminated, and is returned unless a survivor
+        beats it on the same sign test the pure search uses, so the accept gate
+        is unchanged.
+        """
+        planes, scalars = build_features(observation, mask)
+        values = self.net(planes[None], scalars[None])[0]
+        survivors = sorted(legal, key=lambda a: -values[a])
+        if baseline not in survivors:  # defensive: greedy must stay in the field
+            survivors.append(baseline)
+
+        team = team_of(seat)
+        hands = engine.state.hands
+        own_hand = hands.hands[seat]
+        seen = set(hands.played) | set(own_hand)
+        unseen = [card for card in range(NUM_CARDS) if card not in seen]
+        sizes = [len(hands.hands[s]) for s in range(NUM_SEATS)]
+        clone_rng = random.Random()
+
+        per_round = max(1, self.verify_samples // ELIMINATION_ROUNDS)
+        totals = dict.fromkeys(survivors, 0.0)
+        squares = dict.fromkeys(survivors, 0.0)
+        drawn = 0
+        for _ in range(ELIMINATION_ROUNDS):
+            if len(survivors) <= 1:
+                break
+            for _ in range(per_round):
+                world = sample_determinized_hands(
+                    seat, own_hand, unseen, sizes, voids=self.voids.voids, rng=self._rng
+                )
+                for action in survivors:
+                    value = self._value(
+                        engine, seat, action, team=team, world=world, clone_rng=clone_rng
+                    )
+                    totals[action] += value
+                    squares[action] += value * value
+            drawn += per_round
+            survivors = self._survivors(survivors, totals, squares, drawn, baseline)
+
+        best = max(survivors, key=lambda a: totals[a])
+        if best == baseline:
+            return baseline
+        return best if self._beats(engine, seat, best, baseline) else baseline
+
+    @staticmethod
+    def _survivors(
+        actions: list[int],
+        totals: dict[int, float],
+        squares: dict[int, float],
+        drawn: int,
+        baseline: int,
+    ) -> list[int]:
+        """Keep the leader, greedy's action, and everything not yet ruled out."""
+        means = {a: totals[a] / drawn for a in actions}
+        leader = max(actions, key=lambda a: means[a])
+        if drawn < MIN_DRAWS_TO_ELIMINATE:
+            return actions
+        kept = []
+        for a in actions:
+            variance = max(squares[a] / drawn - means[a] ** 2, 0.0)
+            stderr = (variance / drawn) ** 0.5
+            gap = means[leader] - means[a]
+            if a in (leader, baseline) or gap <= ELIMINATION_Z * max(stderr, 1e-9):
+                kept.append(a)
+        return kept
 
     def _value(
         self,

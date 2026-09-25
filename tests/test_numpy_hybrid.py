@@ -184,3 +184,51 @@ def test_allocation_mode_plays_a_full_match_legally() -> None:
     weights = export_weights(RankCNN(channels=TEST_CHANNELS).eval())
     policy = NumpyHybridPolicy(weights, verify_samples=2, allocate=True, seed=0)
     assert len(play_match(policy, seed=29)) > 13
+
+
+def test_elimination_never_drops_the_leader_or_greedy() -> None:
+    """Survivor selection must keep the leader and the baseline unconditionally.
+
+    Pruning failed because it discarded actions before scoring them. Elimination
+    is only safe if the two actions that can still win -- the current leader and
+    greedy's fallback -- are never removed, however far behind greedy looks.
+    """
+    th.manual_seed(0)
+    policy = NumpyHybridPolicy(
+        export_weights(RankCNN(channels=TEST_CHANNELS).eval()), verify_samples=8, eliminate=True
+    )
+    actions = [0, 1, 2, 3]
+    drawn = 10
+    # Action 0 leads by a wide margin; action 3 is greedy and trails badly.
+    totals = {0: 9.0, 1: -8.0, 2: -9.0, 3: -9.5}
+    squares = {a: abs(v) for a, v in totals.items()}
+
+    kept = policy._survivors(actions, totals, squares, drawn, baseline=3)
+    assert 0 in kept, "the leader was eliminated"
+    assert 3 in kept, "greedy's action was eliminated"
+    assert len(kept) < len(actions), "nothing was eliminated despite decisive gaps"
+
+
+def test_elimination_keeps_contenders_that_are_not_ruled_out() -> None:
+    """Actions within noise of the leader must survive."""
+    th.manual_seed(0)
+    policy = NumpyHybridPolicy(
+        export_weights(RankCNN(channels=TEST_CHANNELS).eval()), verify_samples=8, eliminate=True
+    )
+    actions = [0, 1, 2]
+    drawn = 10
+    totals = {0: 1.0, 1: 0.9, 2: 0.8}       # nearly tied
+    squares = {0: 10.0, 1: 10.0, 2: 10.0}   # high variance -> nothing resolvable
+    kept = policy._survivors(actions, totals, squares, drawn, baseline=0)
+    assert set(kept) == set(actions), "a contender was eliminated on noise"
+
+
+def test_elimination_mode_plays_a_full_match_legally() -> None:
+    th.manual_seed(0)
+    policy = NumpyHybridPolicy(
+        export_weights(RankCNN(channels=TEST_CHANNELS).eval()),
+        verify_samples=6,
+        eliminate=True,
+        seed=0,
+    )
+    assert len(play_match(policy, seed=31)) > 13
