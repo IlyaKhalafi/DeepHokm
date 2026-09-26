@@ -99,8 +99,8 @@ def test_forward_edge_case_empty_hand() -> None:
     assert th.isfinite(out).all()
 
     emptied = []
-    for state in gather_states(16, seed=5):
-        state = {k: v.copy() for k, v in state.items()}
+    for gathered in gather_states(16, seed=5):
+        state = {k: v.copy() for k, v in gathered.items()}
         state["hand"] = np.zeros_like(state["hand"])
         emptied.append(state)
     out = ext(stack(emptied))

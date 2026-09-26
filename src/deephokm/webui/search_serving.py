@@ -164,7 +164,9 @@ def describe_policy(policy: SearchServedPolicy | None) -> dict[str, object]:
     return {
         "policy": "numpy-qnet+elimination-search",
         "search_k": policy.policy.verify_samples,
-        "tricks_per_hand": TRICKS_PER_HAND,
+        # A hand stops at seven tricks for either team; 13 is the cap, not
+        # the length.
+        "max_tricks_per_hand": TRICKS_PER_HAND,
     }
 
 
