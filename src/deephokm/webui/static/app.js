@@ -214,11 +214,44 @@ function render() {
   // trick legend: only meaningful once this trick has a card on the table
   // (leading a trick, trump selection, and match-over all show an empty
   // table, where "led the trick" / "latest play" refer to nothing yet).
-  $("trick-legend").classList.toggle("hidden", state.table.length === 0);
+  // With an empty table, show the trick that just finished rather than a bare
+  // felt: this is the only moment the player can see how the trick was won.
+  const showingLastTrick = state.table.length === 0 && (state.last_trick || []).length > 0;
+  if (showingLastTrick) {
+    for (const entry of state.last_trick) {
+      const holder = $(`cards-${entry.seat}`);
+      if (!holder) continue;
+      holder.innerHTML = "";
+      const el = cardEl(entry.card, { tiny: true });
+      el.classList.add("resolved");
+      if (entry.seat === state.last_trick_winner) {
+        el.classList.add("trick-winner");
+        el.title = "won the trick";
+      }
+      holder.appendChild(el);
+    }
+  }
+  $("trick-legend").classList.toggle("hidden", state.table.length === 0 && !showingLastTrick);
   // "TABLE" only helps while the felt is empty; with cards down it is noise
   // sitting in the middle of the play area.
   const centre = $("trick-center");
-  if (centre) centre.classList.toggle("hidden", state.table.length > 0);
+  if (centre) {
+    centre.classList.toggle("hidden", state.table.length > 0 || showingLastTrick);
+  }
+  // Named distinctly: `banner` is already taken in this scope by the
+  // match-result element, and redeclaring it breaks the whole script.
+  const trickBanner = $("trick-result");
+  if (trickBanner) {
+    const winner = state.last_trick_winner;
+    trickBanner.classList.toggle("hidden", !showingLastTrick || winner === null);
+    if (showingLastTrick && winner !== null) {
+      const mine = winner % 2 === state.viewer_seat % 2;
+      trickBanner.textContent = mine
+        ? "Your team wins the trick"
+        : "Opponents win the trick";
+      trickBanner.classList.toggle("theirs", !mine);
+    }
+  }
 
   // hand: in spectate mode the API sends no private hand; the bottom row is
   // removed so the layout reads as a spectator view, not a missing player.
@@ -288,7 +321,18 @@ async function refresh() {
   }
 }
 
+// Pauses between plies. The server resolves a ply instantly, so without a
+// deliberate pause every reply and the whole trick would land in one frame and
+// the player would never see what the other seats played.
+const REPLY_PAUSE_MS = 850;
+const TRICK_PAUSE_MS = 1400;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+let advancing = false;
+
 async function playAction(action) {
+  if (advancing) return;           // ignore clicks while the table is resolving
   try {
     state = await api(`/api/games/${gameId}/action`, {
       method: "POST",
@@ -296,17 +340,52 @@ async function playAction(action) {
     });
     render();
     updateStatusFromState();
+    await advanceUntilMyTurn();
   } catch (err) {
     setStatus(err.message, true);
     await refresh();
   }
 }
 
+/**
+ * Step the AI seats one at a time so each reply is visible.
+ *
+ * The action endpoint applies only the player's own card. Each remaining seat
+ * is advanced by its own request with a pause between, and a longer pause once
+ * a trick completes so the winning play can be read before the next trick
+ * starts.
+ */
+async function advanceUntilMyTurn() {
+  advancing = true;
+  try {
+    let guard = 0;
+    while (
+      state && !state.terminal &&
+      state.current_seat !== state.viewer_seat &&
+      guard++ < 60
+    ) {
+      const tableBefore = state.table.length;
+      await sleep(tableBefore === 0 && state.last_trick.length ? TRICK_PAUSE_MS : REPLY_PAUSE_MS);
+      state = await api(`/api/games/${gameId}/step`, { method: "POST" });
+      render();
+      updateStatusFromState();
+    }
+    // Hold the completed trick on screen before the player acts again.
+    if (state && !state.terminal && state.table.length === 0 && state.last_trick.length) {
+      await sleep(TRICK_PAUSE_MS);
+      render();
+    }
+  } finally {
+    advancing = false;
+    render();
+  }
+}
+
 async function startGame() {
+  // No seed is sent: the server picks one. The API still accepts an explicit
+  // seed for reproducing a deal, which is what the evaluation harness uses.
   const mode = $("mode").value;
-  const seedRaw = $("seed").value.trim();
   const body = { mode };
-  if (seedRaw !== "") body.seed = parseInt(seedRaw, 10);
   try {
     state = await api("/api/games", { method: "POST", body: JSON.stringify(body) });
     gameId = state.game_id;

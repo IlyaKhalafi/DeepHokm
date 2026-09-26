@@ -79,7 +79,11 @@ select, input {
   border-radius: 8px;
   padding: 8px 10px;
   font-size: 14px;
-  width: 55%;
+  /* Sized to the longest option rather than a fixed share of the row:
+     at 55% the text clipped to "Play against the". */
+  width: auto;
+  min-width: 15rem;
+  max-width: 100%;
 }
 button {
   background: var(--accent);
@@ -410,4 +414,25 @@ footer {
   border: 1px solid #3a4855;
   font-size: 11px;
   text-align: center;
+}
+
+
+/* The trick that just resolved. Held on screen briefly: the engine clears a
+   trick the moment its fourth card lands, and without this the player never
+   sees how it was won. */
+.trick-result {
+  text-align: center;
+  margin: 10px auto 2px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent, #4ade80);
+  letter-spacing: 0.01em;
+}
+.trick-result.theirs { color: #f2a08a; }
+
+.card.resolved { opacity: 0.85; }
+.card.tiny.trick-winner {
+  outline: 2px solid var(--accent, #4ade80);
+  outline-offset: 1px;
+  opacity: 1;
 }

@@ -22,10 +22,6 @@
         <option value="spectate">Spectate AI vs AI</option>
       </select>
     </div>
-    <div class="row">
-      <label for="seed">Seed <span class="muted">(optional)</span></label>
-      <input id="seed" type="number" min="0" max="2147483647" placeholder="random">
-    </div>
     <button id="start">Start game</button>
   </section>
 
@@ -60,6 +56,7 @@
       <div class="seat seat-south" id="seat-0"><div class="seat-label">YOU</div><div class="seat-cards" id="cards-0"></div></div>
       <div class="table-corner"></div>
     </div>
+    <div id="trick-result" class="trick-result hidden"></div>
     <div class="trick-legend" id="trick-legend">
       <span class="key"><span class="dash"></span>led the trick</span>
       <span class="key"><span>▲</span>latest play</span>
