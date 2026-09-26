@@ -19,6 +19,7 @@ from deephokm.rules import dealing, legality, scoring, tricks
 from deephokm.rules.state import (
     NUM_SEATS,
     TRICKS_PER_HAND,
+    TRICKS_TO_WIN_HAND,
     HandState,
     MatchState,
     Phase,
@@ -41,8 +42,8 @@ class ActionOutcome:
         trick_complete: Whether this action completed a trick.
         trick_winner: The seat that won the completed trick, if any.
         tricks_won: Per-team trick tally *of the hand this trick belonged
-            to*, captured at the moment the trick completed. A completed
-            hand's 13th trick immediately deals the next hand (zeroing the
+            to*, captured at the moment the trick completed. The deciding
+            trick immediately deals the next hand (zeroing the
             live ``HandState.tricks_won``), so a caller wanting the final
             tally of the hand that just ended must read it from here, not
             from the engine's current state.
@@ -223,8 +224,8 @@ class HokmEngine:
         hands.trick_winners.append(winner)
         hands.current_trick = []
         hands.leader = winner
-        # Snapshot now: a 13th trick redeals the next hand below, zeroing
-        # HandState.tricks_won before a caller can read the final tally.
+        # Snapshot now: the deciding trick redeals the next hand below,
+        # zeroing HandState.tricks_won before a caller can read the tally.
         tricks_won_snapshot = (hands.tricks_won[0], hands.tricks_won[1])
 
         trick_complete = True
@@ -233,7 +234,10 @@ class HokmEngine:
         match_complete = False
         match_winner_team: int | None = None
 
-        if len(hands.trick_winners) == TRICKS_PER_HAND:
+        if (
+            max(hands.tricks_won) >= TRICKS_TO_WIN_HAND
+            or len(hands.trick_winners) == TRICKS_PER_HAND
+        ):
             hands.phase = Phase.HAND_OVER
             hand_complete = True
             hand_winner_team = scoring.score_hand(hands.tricks_won)

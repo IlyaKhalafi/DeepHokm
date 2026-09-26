@@ -77,7 +77,13 @@ def test_forward_shapes_on_padded_batch() -> None:
 
 
 def test_forward_edge_case_empty_hand() -> None:
-    """The terminal observation (hand fully played out) must forward cleanly."""
+    """An observation whose hand is empty must forward cleanly.
+
+    A hand now ends the moment a team takes seven tricks, so the terminal
+    observation of a match can still carry unplayed cards. The empty-hand
+    path is therefore exercised directly by zeroing the hand planes of
+    real states, alongside the true terminal observation.
+    """
     ext = HokmTransformerExtractor(observation_space())
     env = make_env(3)
     rng = random.Random(0)
@@ -87,10 +93,18 @@ def test_forward_edge_case_empty_hand() -> None:
         legal = np.flatnonzero(info["action_mask"])
         obs, _, term, trunc, info = env.step(int(rng.choice(legal)))
         done = term or trunc
-    assert obs["hand"].sum() == 0, "terminal observation should hold no cards"
     batch = {k: th.tensor(np.stack([v, v])) for k, v in obs.items()}
     out = ext(batch)
     assert out.shape == (2, ext.d_model)
+    assert th.isfinite(out).all()
+
+    emptied = []
+    for state in gather_states(16, seed=5):
+        state = {k: v.copy() for k, v in state.items()}
+        state["hand"] = np.zeros_like(state["hand"])
+        emptied.append(state)
+    out = ext(stack(emptied))
+    assert out.shape == (len(emptied), ext.d_model)
     assert th.isfinite(out).all()
 
 

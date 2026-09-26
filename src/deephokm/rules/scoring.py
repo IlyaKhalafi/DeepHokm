@@ -27,11 +27,16 @@ def hand_winner_team(tricks_won: list[int]) -> int | None:
 def score_hand(tricks_won: list[int]) -> int:
     """Return the game point awarded for a completed hand (0 or 1 per team).
 
+    A hand ends the moment a team reaches ``TRICKS_TO_WIN_HAND``, so the
+    tally can sum to anything from 7 to 13; what is required is that the
+    played tricks are a plausible prefix of a hand (no more than 13) and
+    that a team has actually crossed the line.
+
     Raises:
-        ValueError: If the trick counts do not sum to 13 or neither team won.
+        ValueError: If more than 13 tricks are recorded or neither team won.
     """
-    if sum(tricks_won) != TRICKS_PER_HAND:
-        raise ValueError(f"trick counts {tricks_won} do not sum to {TRICKS_PER_HAND}")
+    if sum(tricks_won) > TRICKS_PER_HAND:
+        raise ValueError(f"trick counts {tricks_won} exceed {TRICKS_PER_HAND}")
     winner = hand_winner_team(tricks_won)
     if winner is None:
         raise ValueError(f"no team reached {TRICKS_TO_WIN_HAND} tricks: {tricks_won}")

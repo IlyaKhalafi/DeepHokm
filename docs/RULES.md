@@ -15,9 +15,10 @@ these deliberate design decisions (no other variants are supported):
   every player holds exactly 13 (the hakem 5 + 8).
 - The hakem leads the first trick. Players must follow the led suit when able,
   otherwise may play any card. The highest trump wins the trick; absent trump,
-  the highest card of the led suit wins. The winner leads next. 13 tricks per
-  hand.
-- Capturing 7+ of 13 tricks wins the hand for the team and scores 1 game point.
+  the highest card of the led suit wins. The winner leads next. A hand runs up
+  to 13 tricks but ends the moment either team captures 7 — the remaining
+  cards are not played.
+- Capturing 7 tricks wins the hand for the team and scores 1 game point.
   No kot/bustom bonus in v1.
 - First team to 7 game points wins the match. One RL episode = one full match.
   If the hakem's team won the hand the hakem stays; otherwise the hakem passes

@@ -153,7 +153,7 @@ def test_action_outcome_tricks_won_reflects_the_completed_hand() -> None:
                 break
         assert outcome is not None and outcome.hand_complete
         assert outcome.tricks_won is not None
-        assert sum(outcome.tricks_won) == TRICKS_PER_HAND
+        assert TRICKS_TO_WIN_HAND <= sum(outcome.tricks_won) <= TRICKS_PER_HAND
         assert max(outcome.tricks_won) >= TRICKS_TO_WIN_HAND
         # Not the fresh [0, 0] the just-dealt next hand would show.
         assert outcome.tricks_won != (0, 0)
@@ -206,22 +206,17 @@ def test_trick_winner_leads_next() -> None:
 def test_hand_completion_transitions_and_deals() -> None:
     eng = make_engine(8)
     outcome = None
-    tricks_before: list[int] = []
     while eng.state.winner is None:
-        # Snapshot the live hand's trick tally so post-hand assertions can
-        # inspect it even after the engine swaps in a fresh deal.
-        if len(eng.state.hands.trick_winners) == TRICKS_PER_HAND - 1:
-            tricks_before = list(eng.state.hands.tricks_won)
         outcome = eng.apply_action(eng.rng.choice(eng.legal_actions()))
         if outcome is not None and outcome.hand_complete:
             break
     assert outcome is not None and outcome.hand_complete
     assert outcome.hand_winner_team is not None
     # The final trick decided the hand: the winner reached at least 7 tricks
-    # and the loser stayed below it.
-    final_tally = list(tricks_before)
-    final_tally[outcome.hand_winner_team] += 1
-    assert sum(final_tally) == TRICKS_PER_HAND
+    # and the loser stayed below it. The tally rides on the outcome because
+    # the engine has already dealt the next hand by the time it returns.
+    final_tally = list(outcome.tricks_won or ())
+    assert TRICKS_TO_WIN_HAND <= sum(final_tally) <= TRICKS_PER_HAND
     assert final_tally[outcome.hand_winner_team] >= TRICKS_TO_WIN_HAND
     assert final_tally[1 - outcome.hand_winner_team] < TRICKS_TO_WIN_HAND
     if eng.state.winner is None:

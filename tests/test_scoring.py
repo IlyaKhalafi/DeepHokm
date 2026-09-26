@@ -31,27 +31,29 @@ def test_hand_winner_undecided_below_seven() -> None:
 def test_score_hand_returns_winning_team() -> None:
     assert scoring.score_hand([7, 6]) == 0
     assert scoring.score_hand([5, 8]) == 1
+    # Early end: the hand stops at the seventh trick, so the tally may sum
+    # to anything from 7 upward.
+    assert scoring.score_hand([7, 0]) == 0
+    assert scoring.score_hand([3, 7]) == 1
 
 
 def test_score_hand_rejects_bad_totals() -> None:
-    with pytest.raises(ValueError, match="do not sum"):
+    with pytest.raises(ValueError, match="exceed"):
         scoring.score_hand([7, 7])
-    with pytest.raises(ValueError, match="do not sum"):
+    with pytest.raises(ValueError, match="exceed"):
+        scoring.score_hand([0, 14])
+    # A plausible-looking tally where nobody crossed the line is still wrong.
+    with pytest.raises(ValueError, match="no team reached"):
         scoring.score_hand([6, 6])
 
 
-def test_score_hand_no_winner_guard_is_unreachable_with_valid_sum() -> None:
-    """With 13 tricks split between two teams, one team always has >= 7.
-
-    The no-winner ValueError guard in score_hand is therefore defensive only;
-    hand_winner_team is the function that exposes the undecided state.
-    """
+def test_hand_winner_needs_seven_tricks() -> None:
+    """A full 13-trick split always has a winner; a partial one may not."""
     for a in range(14):
         if scoring.hand_winner_team([a, 13 - a]) is None:
             raise AssertionError(f"split [{a}, {13 - a}] has no winner")
-    # The guard still fires for the malformed-then-undecided path: a total of
-    # 13 is required first, so a no-winner split can never reach it.
     assert scoring.hand_winner_team([6, 6]) is None
+    assert scoring.hand_winner_team([6, 5]) is None
 
 
 def _empty_match() -> MatchState:

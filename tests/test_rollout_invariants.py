@@ -1,9 +1,10 @@
 """Seeded full-match rollout invariants under masked random policies.
 
 1000 matches are played; every engine invariant is asserted continuously:
-each card played exactly once per hand, exactly 13 tricks per hand,
-follow-suit never violated, trick counts sum to 13, termination exactly when
-a team reaches 7 points, and seeded reproducibility.
+each card played at most once per hand, a hand ends the moment a team takes
+7 tricks, follow-suit never violated, trick counts stay consistent with the
+hands actually completed, termination exactly when a team reaches 7 points,
+and seeded reproducibility.
 """
 
 from __future__ import annotations
@@ -54,10 +55,11 @@ def _check_hand_completion(
     ``final_tally`` is the completed hand's trick tally, captured before the
     engine swapped in the next deal.
     """
-    assert len(hand_cards) == NUM_CARDS, (
-        f"seed {seed}: hand ended with {len(hand_cards)} cards played"
+    assert len(hand_cards) == 4 * sum(final_tally), (
+        f"seed {seed}: hand ended with {len(hand_cards)} cards played "
+        f"for tally {final_tally}"
     )
-    assert sum(final_tally) == TRICKS_PER_HAND
+    assert TRICKS_TO_WIN_HAND <= sum(final_tally) <= TRICKS_PER_HAND
     assert max(final_tally) >= TRICKS_TO_WIN_HAND
     assert sum(1 for t in final_tally if t >= TRICKS_TO_WIN_HAND) == 1
     if eng.state.winner is not None:
@@ -82,7 +84,7 @@ def play_match_with_invariants(seed: int) -> dict[str, float]:
 
     hand_cards: set[int] = set()
     hands_played = 0
-    trick_count = 0
+    tricks_this_hand = 0
     while eng.state.winner is None:
         hands = eng.state.hands
         # Snapshot the tally before acting: a hand-completing action replaces
@@ -107,13 +109,13 @@ def play_match_with_invariants(seed: int) -> dict[str, float]:
             hand_cards.add(outcome.card)
 
         if outcome.trick_complete:
-            trick_count += 1
+            tricks_this_hand += 1
             winner = outcome.trick_winner
             assert winner is not None
-            assert sum(hands.tricks_won) == trick_count - (TRICKS_PER_HAND * hands_played)
             if not outcome.hand_complete:
                 # Mid-hand the trick winner leads the next trick; a
                 # hand-completing trick triggers an immediate re-deal.
+                assert sum(hands.tricks_won) == tricks_this_hand
                 assert eng.current_seat() == winner
 
         if outcome.hand_complete:
@@ -123,7 +125,7 @@ def play_match_with_invariants(seed: int) -> dict[str, float]:
             assert outcome.trick_winner is not None
             final_tally[outcome.hand_winner_team] += 1
             hand_cards = _check_hand_completion(seed, eng, hand_cards, final_tally)
-            trick_count = TRICKS_PER_HAND * hands_played
+            tricks_this_hand = 0
 
     assert eng.state.winner in (0, 1)
     assert hands_played >= POINTS_TO_WIN_MATCH, (

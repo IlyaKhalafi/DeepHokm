@@ -23,6 +23,7 @@ from deephokm.rules.state import (
     HAKEM_FIRST_BATCH,
     NUM_SEATS,
     TRICKS_PER_HAND,
+    TRICKS_TO_WIN_HAND,
     team_of,
 )
 
@@ -314,7 +315,7 @@ def test_trick_reward_shaping() -> None:
 
 
 def test_every_card_played_once_per_hand_via_obs() -> None:
-    """Across a hand, the seen vector grows to 52 and trick totals sum to 13."""
+    """The seen vector grows through a hand and resets on every re-deal."""
     env = HokmEnv(seat=0, opponents=random_opponents(41))
     obs, info = env.reset(seed=41)
     done = False
@@ -324,15 +325,20 @@ def test_every_card_played_once_per_hand_via_obs() -> None:
         action = int(np.flatnonzero(info["action_mask"])[0])
         obs, _, term, trunc, info = env.step(action)
         done = term or trunc
-    # Within a hand the seen count only grows, up to the full 52. A re-deal
-    # resets it: to exactly 5 if the learner is the new hakem (only the
-    # opening 5 are dealt at the trump-call decision point), or to >= 13
-    # otherwise (the learner's first observation of the new hand already
-    # follows the hakem's trump declaration, by which point the full deal —
-    # and possibly some card play — has happened).
+    # Within a hand the seen count only grows (never past the 52-card deck,
+    # and the fully-played 52-card state is never observed because the engine
+    # redeals inside the same step that finishes the hand). A re-deal resets
+    # it: to exactly 5 if the learner is the new hakem (only the opening 5
+    # are dealt at the trump-call decision point), or to >= 13 otherwise (the
+    # learner's first observation of the new hand already follows the hakem's
+    # trump declaration, by which point the full deal — and possibly some
+    # card play — has happened).
     for a, b in zip(seen_counts, seen_counts[1:], strict=False):
         assert b >= a or b == HAKEM_FIRST_BATCH or b >= CARDS_PER_PLAYER
-    assert max(seen_counts) == NUM_CARDS
+    assert max(seen_counts) <= NUM_CARDS
+    # Every hand reaches the seventh trick, and the learner always gets a turn
+    # in it, so some observation must see at least the first six tricks public.
+    assert max(seen_counts) >= 4 * TRICKS_TO_WIN_HAND
 
 
 def test_no_hidden_information_leak() -> None:
@@ -409,7 +415,7 @@ def test_follow_suit_never_violated_under_random_policy() -> None:
 
 
 def test_episode_length_matches_match_actions() -> None:
-    """Learner steps: one per learner decision (13+ per hand as the hakem)."""
+    """Learner steps: one per learner decision (every trick of every hand)."""
     env = HokmEnv(seat=0, opponents=random_opponents(51))
     obs, info = env.reset(seed=51)
     steps = 0

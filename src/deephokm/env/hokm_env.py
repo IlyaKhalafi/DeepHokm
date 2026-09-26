@@ -58,9 +58,9 @@ class HokmEnv(gym.Env[Observation, np.integer]):
             Off by default, preserving the original one-seat contract.
         hand_only: When ``True``, the episode ends at the first completed
             hand rather than playing out the whole match. A curriculum knob:
-            a full match is a long, sparse-reward episode (~13 tricks per
-            hand times however many hands it takes one team to reach 7
-            points) that is a much noisier credit-assignment problem than a
+            a full match is a long, sparse-reward episode (a hand runs to
+            the seventh trick times however many hands it takes one team
+            to reach 7 points) that is a much noisier credit-assignment problem than a
             single hand. The underlying engine still deals the next hand
             internally when one finishes (it has no "pause here" mode), but
             the environment simply never plays into it -- the episode is
@@ -99,8 +99,8 @@ class HokmEnv(gym.Env[Observation, np.integer]):
             opponent_provider: Optional callable invoked on every ``reset()``
                 to draw a fresh length-4 opponent list.
             hand_reward: Magnitude of optional +/- shaping per hand won/lost
-                (a hand is 13 tricks; a match is played to 7 hand-level game
-                points). Coarser than ``trick_reward`` and closer to what
+                (a hand ends at 7 tricks; a match is played to 7 hand-level
+                game points). Coarser than ``trick_reward`` and closer to what
                 actually matters -- it rewards winning the hand, not padding
                 a trick count that is already decided.
             control_partner: See the class docstring.
