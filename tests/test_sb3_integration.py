@@ -44,7 +44,8 @@ def test_maskable_ppo_constructs_with_custom_policy() -> None:
     env = make_single_env()
     model = tiny_model(env)
     assert isinstance(model.policy, HokmMaskablePolicy)
-    assert model.policy.features_dim == 128
+    # The reference extractor width (d_model) that the policy heads size to.
+    assert model.policy.features_dim == 256
     env.close()
 
 
