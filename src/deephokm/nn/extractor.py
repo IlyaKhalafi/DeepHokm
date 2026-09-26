@@ -17,7 +17,7 @@ import torch as th
 from gymnasium import spaces
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
-from deephokm.cards import NUM_RANKS
+from deephokm.cards import NUM_RANKS, NUM_SUITS
 from deephokm.nn.tokenizer import (
     CONTEXT_VOCABS,
     CTX_COLUMNS,
@@ -36,11 +36,14 @@ class HokmTransformerExtractor(BaseFeaturesExtractor):
     The observation is tokenized into up to 13 hand tokens, up to 4 trick
     tokens in play order, up to 48 history tokens in recency order, and 5
     context tokens (trump, phase, tricks, points, seat). Card tokens are
-    factorized into a shared rank embedding (13 rows) plus a two-row trump-flag
-    embedding, summed — the suit label itself never enters the input, only the
-    fact that a card is (or is not) trump; each context slot has its own embedding
-    over its bounded value range. Learned type embeddings separate the four
-    groups; learned positional embeddings mark order-sensitive slots (trick
+    factorized into a shared rank embedding (13 rows), a two-row trump-flag
+    embedding, and a four-row canonical suit-slot embedding, summed — the suit
+    label itself never enters the input, only whether a card is trump and which
+    canonical slot its suit occupies, so cards of one suit still share a slot
+    (what follow-suit and void reasoning need) while the suits' names stay out;
+    each context slot has its own embedding over its bounded value range.
+    Learned type embeddings separate the four groups; learned positional
+    embeddings mark order-sensitive slots (trick
     play order, history recency). Hand tokens carry no positional embedding —
     the hand is a set, so permuting hand tokens cannot change the pooled
     features. A learned relative-seat-role embedding (self / next seat
@@ -99,6 +102,7 @@ class HokmTransformerExtractor(BaseFeaturesExtractor):
 
         self.rank_embedding = th.nn.Embedding(NUM_RANKS, d_model)
         self.trump_flag_embedding = th.nn.Embedding(2, d_model)
+        self.suit_slot_embedding = th.nn.Embedding(NUM_SUITS, d_model)
         self.type_embedding = th.nn.Embedding(NUM_TYPES, d_model)
         self.position_embedding = th.nn.Embedding(NUM_POSITION_SLOTS, d_model)
         self.role_embedding = th.nn.Embedding(ROLE_VOCAB, d_model)
@@ -150,15 +154,17 @@ class HokmTransformerExtractor(BaseFeaturesExtractor):
     def _embed(self, tokens: TokenizedObservation) -> th.Tensor:
         """Combine card, type, position, and context embeddings.
 
-        Card slots take the summed rank + trump-flag embeddings (non-card
-        slots index row 0 / flag False — their entries are value indices, not
-        cards, and the context embedding below replaces them anyway); context
-        slots take their per-slot embedding. Type, positional, and role
-        embeddings are added on top.
+        Card slots take the summed rank + trump-flag + suit-slot embeddings
+        (non-card slots index row 0 / flag False — their entries are value
+        indices, not cards, and the context embedding below replaces them
+        anyway); context slots take their per-slot embedding. Type,
+        positional, and role embeddings are added on top.
         """
+        card = tokens.is_card.to(th.long)
         trump = tokens.is_trump.to(th.long)
-        x = self.rank_embedding(tokens.ranks * tokens.is_card.to(th.long))
-        x = x + self.trump_flag_embedding(trump * tokens.is_card.to(th.long))
+        x = self.rank_embedding(tokens.ranks * card)
+        x = x + self.trump_flag_embedding(trump * card)
+        x = x + self.suit_slot_embedding(tokens.suit_slots * card)
 
         # Context values replace the (zeroed) card embedding at their slots.
         context_stack: th.Tensor = th.stack(

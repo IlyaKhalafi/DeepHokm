@@ -4,8 +4,12 @@
 convolutional action-value network guiding a determinized search.
 
 Beats a scripted greedy opponent in **85.5%** of matches (399 held-out matches,
-95% CI [0.820, 0.889]). Runs on **numpy alone** at **30 ms per decision** —
-PyTorch is a development dependency, not a runtime one.
+95% CI [0.820, 0.889]).
+
+**No deep-learning framework at play time.** Inference is numpy; PyTorch
+trains the network and converts its weights, and is a development dependency
+only. A decision costs 30 ms. This is enforced by a test that blocks the torch
+import and plays a match anyway.
 
 ![DeepHokm web UI](docs/media/demo.gif)
 
@@ -19,25 +23,36 @@ make webui        # http://localhost:8025
 Play a seat against the model, or watch it play itself. The engine that serves
 the UI is the same one used for evaluation.
 
-## How it works, in one paragraph
+## How it works
 
-Each decision is scored by sampling **determinized worlds** — full deals of the
-unseen cards consistent with everything public: your hand, every card played,
-and the suit voids revealed when a player fails to follow suit. Every legal card
-is played out in each sampled world, and a card is preferred over the scripted
-baseline only when it wins an exact one-sided sign test, so the policy deviates
-on evidence rather than on noise. The network's job is to make that search
-cheap: a **suit-equivariant CNN** (6.4M parameters, `1x3` convolutions along the
-*rank* axis with weights shared across all four suits, since the rules are
-symmetric under relabelling suits but ranks are ordered) scores all 52 cards in
-one pass and orders the candidates, and actions are eliminated only once the
-evidence rules them out — never pruned before being scored. It is trained by
-supervised distillation from the search itself: 47,599 decisions labelled by a
-much stronger search, fitted with a soft-target cross-entropy whose temperature
-matches the teacher's sampling error, restricted to the decisions where the
-teacher actually has a preference.
+Each decision samples **determinized worlds** — full deals of the unseen cards
+consistent with everything public: your hand, every card played, and the suit
+voids revealed when a player fails to follow suit. Every legal card is played
+out in each world, and a card beats the scripted baseline only by winning an
+exact one-sided sign test, so the policy deviates on evidence rather than noise.
+The network makes that search cheap: it scores all 52 cards in one pass, orders
+the candidates, and lets the search eliminate an action only once the evidence
+rules it out — never before it has been scored.
 
-## Results
+![RankCNN architecture](docs/media/rankcnn.svg)
+
+**Inference is numpy.** The trained weights are converted to a `.npz` archive
+and the forward pass is reimplemented in numpy, so nothing at play time imports
+PyTorch — a test enforces it by blocking the import and playing a match.
+
+### What we tried, and what we kept
+
+| idea | outcome |
+|---|---|
+| Self-play reinforcement learning (MaskablePPO, transformer) | **abandoned** — plateaued at the level of a greedy clone across every variant |
+| Six network architectures, 377k to 8M parameters | **abandoned** — all landed in one band; a structure-free MLP matched the transformer |
+| Regression on raw search values, scored by teacher agreement | **replaced** — 60% of decisions have tied best actions, so the metric graded coin flips |
+| Distilling from a weak search | **replaced** — a student cannot exceed its teacher, and that one won only 73% |
+| Pruning the search to the network's top choices | **replaced** — lost to plain search: an action never scored can never be chosen |
+| **Suit-equivariant CNN + soft targets on decisive decisions + elimination search** | **kept** — the design above |
+
+Each row is a measurement, not an opinion; the numbers behind them and how one
+led to the next are in [the methods write-up](docs/METHODS_AND_RESULTS.md).
 
 | policy | win rate vs greedy | matches | cost |
 |---|---|---|---|
@@ -52,10 +67,9 @@ settings; 95% CI [0.820, 0.889].
 † measured during development on the seed sets used for tuning, so these are
 indicative rather than held-out.
 
-The network does not raise the ceiling — it reaches the search's own level and
-makes small-budget search substantially stronger (0.713 against 0.570 at
-K=48). Why no
-policy in this family can exceed the search it wraps is derived in
+The network does not raise the ceiling: it reaches the search's own level and
+makes small-budget search substantially stronger. Why nothing in this family can
+exceed the search it wraps is derived in
 [the methods write-up](docs/METHODS_AND_RESULTS.md#19-why-the-hybrid-cannot-beat-the-search-it-wraps).
 
 ## Documentation
@@ -68,22 +82,6 @@ policy in this family can exceed the search it wraps is derived in
 | [Rules](docs/RULES.md) | The exact Hokm variant implemented |
 | [Deployment](docs/DEPLOYMENT.md) | Web UI, Docker, configuration |
 | [Result tables](docs/RESULTS_TABLES.md) | Raw measurements from earlier phases |
-
-## What did not work
-
-Recorded because the negative results took most of the effort and are the
-reason the final design looks as it does:
-
-- **Self-play reinforcement learning** plateaued at the level of a greedy
-  clone across every variant tried. A one-ply policy cannot represent lines
-  that pay off several tricks later.
-- **Architecture search moved nothing.** Six variants from 377k to 8M
-  parameters landed in one band; a structure-free MLP matched the transformer.
-- **Agreement with the teacher was a broken metric.** 60% of decisions have
-  tied best actions and 32% have no real choice at all, so most of the metric
-  was grading coin flips.
-- **Pruning to the network's favourites lost to plain search**, because an
-  action that is never scored can never be chosen.
 
 ## Development
 

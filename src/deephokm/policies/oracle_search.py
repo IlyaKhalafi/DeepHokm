@@ -135,10 +135,11 @@ def _oracle_value(engine: HokmEngine, remaining_depth: int, ctx: _SearchContext)
     # Always CARD_PLAY here (callers assert it; a card play can only exit it
     # via a completed hand, which returns before recursing). Inline the same
     # next-seat rule engine.current_seat() applies in CARD_PLAY.
-    if hands.current_trick:
-        seat = (hands.current_trick[-1][0] + 1) % NUM_SEATS
-    else:
-        seat = hands.leader
+    seat = (
+        (hands.current_trick[-1][0] + 1) % NUM_SEATS
+        if hands.current_trick
+        else hands.leader
+    )
     legal = engine.legal_actions(seat)
     controlled = seat in ctx.controlled_seats
 

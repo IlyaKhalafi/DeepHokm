@@ -9,6 +9,9 @@ error), and it can be too slow for interactive play. Both are gated here.
 from __future__ import annotations
 
 import random
+import subprocess
+import sys
+import textwrap
 import time
 
 import numpy as np
@@ -131,3 +134,59 @@ def test_weight_roundtrip_needs_no_torch(tmp_path) -> None:  # noqa: ANN001
 def test_rejects_weights_that_are_not_a_rank_cnn() -> None:
     with pytest.raises(ValueError, match="RankCNN"):
         NumpyQNet({"something.weight": np.zeros((2, 2), dtype=np.float32)})
+
+
+def test_play_path_does_not_import_torch() -> None:
+    """Playing must not pull in PyTorch.
+
+    The README states that a deployment installs numpy without a deep-learning
+    framework. That held only by accident until ``deephokm.nn``'s eager imports
+    were made lazy: importing the feature builder used to drag in the
+    transformer extractor and therefore torch. This runs a subprocess with the
+    torch import blocked and plays part of a match, so the claim fails loudly
+    if any play-time module reaches for it again.
+    """
+    script = textwrap.dedent(
+        """
+        import sys
+
+        class Blocker:
+            def find_module(self, name, path=None):
+                if name == "torch" or name.startswith("torch."):
+                    return self
+
+            def load_module(self, name):
+                raise ImportError("torch imported at play time: " + name)
+
+        sys.meta_path.insert(0, Blocker())
+
+        from deephokm.env.spaces import mask_for, observation_for
+        from deephokm.policies.greedy_policy import GreedyPolicy
+        from deephokm.policies.numpy_hybrid import NumpyHybridPolicy
+        from deephokm.rules.engine import HokmEngine
+
+        engine = HokmEngine()
+        engine.start_match(seed=5)
+        greedy = GreedyPolicy()
+        for _ in range(12):
+            if engine.state.winner is not None:
+                break
+            seat = engine.current_seat()
+            hands = engine.state.hands
+            legal = engine.legal_actions(seat)
+            obs = observation_for(hands, seat, engine.state.game_points)
+            engine.apply_action(greedy.act(obs, mask_for(legal)), seat=seat)
+
+        assert "torch" not in sys.modules, "torch was imported by the play path"
+        print("OK")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, f"play path imported torch:\n{result.stderr[-1500:]}"
+    assert "OK" in result.stdout

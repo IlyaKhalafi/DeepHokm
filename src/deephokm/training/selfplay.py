@@ -36,10 +36,15 @@ from deephokm.policies.base import HokmPolicy
 from deephokm.policies.greedy_policy import GreedyPolicy
 from deephokm.policies.random_policy import RandomPolicy
 
-P_LATEST = 0.00
-P_POOL = 0.00
-P_GREEDY = 0.00
-P_RANDOM = 1.00
+# Per-episode opponent mix. These were temporarily set to all-random during a
+# diagnostic run and must not be left that way: with P_LATEST and P_POOL at
+# zero a snapshot can never be drawn and self-play degenerates into permanent
+# play against random opponents, which trains nothing. The regression test
+# test_provider_picks_up_snapshots_written_after_construction fails if they are.
+P_LATEST = 0.55
+P_POOL = 0.25
+P_GREEDY = 0.10
+P_RANDOM = 0.10
 
 SNAPSHOT_GLOB = "snapshot_*.zip"
 

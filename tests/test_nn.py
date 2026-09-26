@@ -179,11 +179,13 @@ def test_padding_invariance() -> None:
                 shape = tokens.tokens.shape
                 dev = tokens.tokens.device
                 noise_trump = th.randint(0, 2, shape, device=dev).bool()
+                noise_slot = th.randint(0, 4, shape, device=dev)
                 tokens = dataclasses.replace(
                     tokens,
                     tokens=th.where(pad, noise, tokens.tokens),
                     ranks=th.where(pad, noise_rank, tokens.ranks),
                     is_trump=th.where(pad, noise_trump, tokens.is_trump),
+                    suit_slots=th.where(pad, noise_slot, tokens.suit_slots),
                 )
             return tokens
 
@@ -228,6 +230,7 @@ def test_hand_order_invariance() -> None:
                 "is_card",
                 "ranks",
                 "is_trump",
+                "suit_slots",
                 "type_ids",
                 "padding_mask",
                 "positions",
@@ -321,8 +324,8 @@ def test_full_trick_tokenizers_agree_on_zero_tokens() -> None:
     assert single.tokens[0, 13:17].tolist() == [52] * 4
     batch = {k: th.tensor(np.stack([v])) for k, v in obs.items()}
     vectorized = tokenize_tensor_batch(batch)
-    for field in ("tokens", "is_card", "ranks", "is_trump", "type_ids",
-                  "positions", "roles", "padding_mask"):
+    for field in ("tokens", "is_card", "ranks", "is_trump", "suit_slots",
+                  "type_ids", "positions", "roles", "padding_mask"):
         assert th.equal(getattr(single, field)[0], getattr(vectorized, field)[0]), (
             f"{field} mismatch"
         )
@@ -407,6 +410,7 @@ def test_tokenizers_agree() -> None:
             "is_card",
             "ranks",
             "is_trump",
+            "suit_slots",
             "type_ids",
             "positions",
             "roles",

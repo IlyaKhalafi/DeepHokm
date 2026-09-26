@@ -117,7 +117,8 @@ class LegalDepthSearchPolicy:
         """Record one publicly-played card from anywhere at the table."""
         self.voids.observe(seat, card, led_suit)
 
-    def _score_action(
+    def _score_action(  # noqa: PLR0917 - hot path: called K x |legal| times per
+        # decision, where positional binding is measurably cheaper than keyword
         self,
         engine: HokmEngine,
         seat: int,

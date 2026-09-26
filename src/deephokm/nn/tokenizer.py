@@ -18,7 +18,9 @@ Card tokens are factorized into a rank (``card_id % 13``, the token's
 ``ranks`` entry) and a trump flag (``is_trump``: the card's suit matches the
 declared trump suit; always False while the trump is still all-zero) that the
 extractor maps through a shared rank embedding and a two-row trump-flag
-embedding. Context tokens are not cards: each carries a bounded integer
+embedding, plus a canonical suit slot (``suit_slots``) that preserves which
+cards share a suit without revealing which suit it is. Context tokens are not
+cards: each carries a bounded integer
 feature value that the extractor maps through a dedicated per-slot embedding.
 Learned type
 embeddings distinguish hand/trick/history/context, and learned positional
@@ -33,7 +35,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch as th
 
-from deephokm.cards import NUM_RANKS, PAD_TOKEN
+from deephokm.cards import NUM_RANKS, NUM_SUITS, PAD_TOKEN
 from deephokm.env.spaces import HISTORY_SLOTS, Observation
 from deephokm.rules.state import NUM_SEATS, TRICKS_PER_HAND
 
@@ -93,6 +95,13 @@ class TokenizedObservation:
         is_trump: ``(batch, MAX_TOKENS)`` bool; True for card slots whose
             card's suit matches the declared trump suit; False while the
             trump is still all-zero.
+        suit_slots: ``(batch, MAX_TOKENS)`` int64 canonical suit slot
+            (``0..3``) for card slots; 0 elsewhere. The slot is the card's
+            suit's rank in a canonical, relabeling-invariant ordering of the
+            four suits (see :func:`_canonical_suit_slots`), so two cards share
+            a slot exactly when they share a suit — the same-suit partition
+            follow-suit reasoning needs — without the absolute suit label
+            ever entering the input.
         type_ids: ``(batch, MAX_TOKENS)`` int64 token-type ids.
         positions: ``(batch, MAX_TOKENS)`` int64 slot positions within a type
             (always 0 for hand tokens: the hand is a set).
@@ -110,6 +119,7 @@ class TokenizedObservation:
     is_card: th.Tensor
     ranks: th.Tensor
     is_trump: th.Tensor
+    suit_slots: th.Tensor
     type_ids: th.Tensor
     positions: th.Tensor
     roles: th.Tensor
@@ -255,6 +265,75 @@ def _fill_card_group(
         buffers.padding[col] = True
 
 
+def _canonical_suit_slots(
+    tokens: th.Tensor,
+    is_card: th.Tensor,
+    *,
+    hand: th.Tensor,
+    seen: th.Tensor,
+    trick: th.Tensor,
+    trump: th.Tensor,
+) -> th.Tensor:
+    """Per-token canonical suit slot, invariant to relabeling the suits.
+
+    Collapsing a card to rank plus a trump flag throws away too much: two
+    non-trump cards of different suits become indistinguishable, so the
+    network cannot tell whether a card in hand shares a suit with the led
+    card, which is what follow-suit legality and void reasoning are built
+    on. What the rules actually license is discarding the suits' *names*,
+    not the partition they induce.
+
+    So each suit is scored by a key derived only from suit-symmetric
+    observables — is it trump, which of its ranks are in hand, which are
+    seen, which are on the table — and the suits are ordered by that key.
+    A suit's slot is its position in that order, so the encoding carries
+    "these two cards are the same suit" while never seeing which suit that
+    is. Trump sorts first (its key's top bit), giving it slot 0 whenever it
+    is declared.
+
+    Two suits with byte-identical observables tie; the tie breaks on the
+    lower suit id. Such suits are interchangeable in everything the
+    observation reveals, so the choice cannot change decision quality, but
+    it does mean strict bit-invariance holds only for untied suits.
+
+    Args:
+        tokens: ``(batch, MAX_TOKENS)`` int64 token values (card ids where
+            ``is_card``).
+        is_card: ``(batch, MAX_TOKENS)`` bool card-slot mask.
+        hand: ``(batch, 52)`` int64 own-hand indicator.
+        seen: ``(batch, 52)`` int64 own hand plus every card played.
+        trick: ``(batch, 52)`` int64 cards currently on the table.
+        trump: ``(batch, 4)`` int64 one-hot trump suit; all zeros undeclared.
+
+    Returns:
+        ``(batch, MAX_TOKENS)`` int64 slot in ``0..3`` on card slots, 0
+        elsewhere.
+    """
+    n = hand.shape[0]
+    device = hand.device
+    bits = (1 << th.arange(NUM_RANKS, device=device, dtype=th.int64)).view(1, 1, NUM_RANKS)
+    # Per-suit 13-bit signatures over the three suit-symmetric card sets.
+    by_suit = [x.view(n, NUM_SUITS, NUM_RANKS).to(th.int64) for x in (hand, seen, trick)]
+    hand_sig, seen_sig, trick_sig = ((x * bits).sum(dim=2) for x in by_suit)
+    declared = (trump.sum(dim=1) > 0).view(-1, 1)
+    is_trump_suit = declared & (
+        th.arange(NUM_SUITS, device=device).view(1, -1) == trump.argmax(dim=1, keepdim=True)
+    )
+    key = (
+        (is_trump_suit.to(th.int64) << 39) | (hand_sig << 26) | (seen_sig << 13) | trick_sig
+    )
+    # Descending on the key; ties fall to the lower suit id. Shifting the key
+    # left by two and subtracting the suit id folds both into one sort value.
+    sort_value = (key << 2) - th.arange(NUM_SUITS, device=device).view(1, -1)
+    order = th.argsort(sort_value, dim=1, descending=True, stable=True)
+    slot_of_suit = th.empty((n, NUM_SUITS), dtype=th.int64, device=device)
+    slot_of_suit.scatter_(
+        1, order, th.arange(NUM_SUITS, device=device).view(1, -1).expand(n, NUM_SUITS)
+    )
+    card_suit = th.where(is_card, tokens // NUM_RANKS, th.zeros_like(tokens))
+    return th.where(is_card, th.gather(slot_of_suit, 1, card_suit), th.zeros_like(tokens))
+
+
 def tokenize(observation: Observation) -> TokenizedObservation:
     """Tokenize a single observation into a batch of size 1.
 
@@ -331,11 +410,23 @@ def tokenize(observation: Observation) -> TokenizedObservation:
         buffers.positions[column] = slot
         buffers.padding[column] = True
 
+    tokens_t = th.tensor([buffers.tokens], dtype=th.int64)
+    is_card_t = th.tensor([buffers.is_card], dtype=th.bool)
+    suit_slots = _canonical_suit_slots(
+        tokens_t,
+        is_card_t,
+        hand=th.as_tensor(np.asarray(observation["hand"])[None], dtype=th.int64),
+        seen=th.as_tensor(np.asarray(observation["seen"])[None], dtype=th.int64),
+        trick=th.as_tensor(np.asarray(observation["trick"])[None], dtype=th.int64),
+        trump=th.as_tensor(np.asarray(trump_vec)[None], dtype=th.int64),
+    )
+
     return TokenizedObservation(
-        tokens=th.tensor([buffers.tokens], dtype=th.int64),
-        is_card=th.tensor([buffers.is_card], dtype=th.bool),
+        tokens=tokens_t,
+        is_card=is_card_t,
         ranks=th.tensor([buffers.ranks], dtype=th.int64),
         is_trump=th.tensor([buffers.is_trump], dtype=th.bool),
+        suit_slots=suit_slots,
         type_ids=th.tensor([buffers.type_ids], dtype=th.int64),
         positions=th.tensor([buffers.positions], dtype=th.int64),
         roles=th.tensor([buffers.roles], dtype=th.int64),
@@ -606,11 +697,21 @@ def tokenize_tensor_batch(observations: dict[str, th.Tensor]) -> TokenizedObserv
     buffers.padding[:, TRICK_SLICE] = buffers.is_card[:, TRICK_SLICE]
     buffers.padding[:, HISTORY_SLICE] = buffers.is_card[:, HISTORY_SLICE]
 
+    suit_slots = _canonical_suit_slots(
+        buffers.tokens,
+        buffers.is_card,
+        hand=hand,
+        seen=observations["seen"].to(th.int64),
+        trick=observations["trick"].to(th.int64),
+        trump=trump,
+    )
+
     return TokenizedObservation(
         tokens=buffers.tokens,
         is_card=buffers.is_card,
         ranks=buffers.ranks,
         is_trump=buffers.is_trump,
+        suit_slots=suit_slots,
         type_ids=buffers.type_ids,
         positions=buffers.positions,
         roles=buffers.roles,
