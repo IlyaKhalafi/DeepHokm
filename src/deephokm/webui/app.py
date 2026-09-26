@@ -28,7 +28,12 @@ from deephokm.webui.search_serving import (
     resolve_weights_path,
 )
 from deephokm.webui.serving import ServedPolicy, build_opponents, resolve_model_path
-from deephokm.webui.state import GameStore, apply_human_action, public_state
+from deephokm.webui.state import (
+    GameStore,
+    advance_one_ply,
+    apply_human_action,
+    public_state,
+)
 
 _store = GameStore()
 _model_lock = threading.Lock()
@@ -171,7 +176,11 @@ def submit_action(game_id: str, request: ActionRequest) -> dict[str, Any]:
 
 @app.post("/api/games/{game_id}/step")
 def spectate_step(game_id: str) -> dict[str, Any]:
-    """Advance a spectate game by exactly one ply and return the state.
+    """Advance the game by exactly one ply and return the state.
+
+    Used by both modes. In a human game the client calls this after playing
+    its own card, once per AI seat, so each reply appears on the table
+    instead of the whole trick resolving inside a single request.
 
     Every seat is AI-controlled in spectate mode, so this drives the engine
     directly (``engine.apply_action``) for whichever seat is actually due,
@@ -184,18 +193,17 @@ def spectate_step(game_id: str) -> dict[str, Any]:
     record = _store.get(game_id)
     if record is None:
         raise HTTPException(status_code=404, detail="unknown game id")
-    if record.mode != "spectate":
-        raise HTTPException(status_code=400, detail="only spectate games can step")
-    env = record.env
     # One request at a time per game: the engine is shared mutable state.
     with record.lock:
-        if env.engine.state.winner is None:
-            seat = env.engine.current_seat()
-            mask = env._mask_for(seat)
-            obs = env._observation_for(seat)
-            action = env.opponents[seat].act(obs, mask)
-            env.engine.apply_action(action, seat=seat)
-            record.moves += 1
+        engine = record.env.engine
+        if engine.state.winner is not None:
+            return public_state(record)
+        if record.mode != "spectate" and engine.current_seat() == record.viewer_seat:
+            raise HTTPException(
+                status_code=409,
+                detail="it is your turn; the server does not play your card for you",
+            )
+        advance_one_ply(record)
         return public_state(record)
 
 

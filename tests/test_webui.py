@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch as th
 from fastapi.testclient import TestClient
 from sb3_contrib import MaskablePPO
 
@@ -21,27 +22,55 @@ from deephokm.webui.serving import ServedPolicy
 from deephokm.webui.state import GameStore
 
 
+@pytest.fixture(scope="session")
+def model_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A tiny trained checkpoint, built once for the whole session.
+
+    Training even 128 steps of MaskablePPO takes minutes on CPU, which is
+    fine once but not for every test that needs a served model. Intra-op
+    threading is capped because the model is tiny: with the default thread
+    count each matrix op pays more in thread coordination than it saves, and
+    on a busy machine the process gets starved for cores it never needed.
+    """
+
+    path = tmp_path_factory.mktemp("model") / "model.zip"
+    threads = th.get_num_threads()
+    th.set_num_threads(2)
+    try:
+        env = HokmEnv(seat=0, opponents=[RandomPolicy(i) for i in range(NUM_SEATS)])
+        model = MaskablePPO(
+            HokmMaskablePolicy,
+            env,
+            n_steps=64,
+            batch_size=32,
+            n_epochs=1,
+            device="cpu",
+        )
+        model.learn(total_timesteps=128)
+        model.save(str(path))
+    finally:
+        th.set_num_threads(threads)
+    return path
+
+
 @pytest.fixture()
-def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def client(
+    model_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     """A test client with a real (tiny) trained model served.
 
     Yields inside a context manager so the app's lifespan (model loading)
     runs exactly as it does under uvicorn.
     """
 
-    env = HokmEnv(seat=0, opponents=[RandomPolicy(i) for i in range(NUM_SEATS)])
-    model = MaskablePPO(
-        HokmMaskablePolicy,
-        env,
-        n_steps=64,
-        batch_size=32,
-        n_epochs=1,
-        device="cpu",
-    )
-    model.learn(total_timesteps=128)
-    model_path = tmp_path / "model.zip"
-    model.save(str(model_path))
     monkeypatch.setenv("DEEPHOKM_MODEL", str(model_path))
+    # The app prefers the numpy search weights over DEEPHOKM_MODEL when the
+    # default archive exists; without this the tests would exercise the full
+    # elimination search, which takes minutes per match instead of covering
+    # the HTTP contract quickly with the tiny checkpoint above.
+    monkeypatch.setenv("DEEPHOKM_QNET", str(tmp_path / "absent.npz"))
 
     # Reset module-level state so the new model is picked up.
 
@@ -124,7 +153,7 @@ def test_full_human_game_playable(client: TestClient) -> None:
     moves = 0
     while not state["terminal"]:
         if state["current_seat"] != 0:
-            state = client.get(f"/api/games/{game_id}").json()
+            state = client.post(f"/api/games/{game_id}/step").json()
             continue
         legal = state["legal_actions"]
         assert legal, "viewer's turn but no legal actions"
@@ -202,10 +231,16 @@ def test_human_state_omits_seed(client: TestClient) -> None:
     assert "seed" not in state
 
 
-def test_human_game_rejects_step(client: TestClient) -> None:
+def test_human_game_rejects_step_on_viewer_turn(client: TestClient) -> None:
+    """Stepping is allowed for AI seats only; never for the viewer's seat."""
     state = client.post("/api/games", json={"mode": "human", "seed": 13}).json()
-    response = client.post(f"/api/games/{state['game_id']}/step")
-    assert response.status_code == 400
+    game_id = state["game_id"]
+    # Seat 0 is the viewer; step past any AI plies until it is our turn.
+    while state["current_seat"] != 0 and not state["terminal"]:
+        state = client.post(f"/api/games/{game_id}/step").json()
+    assert state["current_seat"] == 0
+    response = client.post(f"/api/games/{game_id}/step")
+    assert response.status_code == 409
 
 
 def test_public_state_has_no_hidden_information(client: TestClient) -> None:
