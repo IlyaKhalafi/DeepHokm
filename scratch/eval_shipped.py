@@ -13,6 +13,7 @@ argv: shard n_shards matches verify_k top_m weights_npz [seed_base] [mode] [star
 ``mode`` is 0 for top-M pruning, 1 for budget allocation, 2 for sequential
 elimination.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -51,7 +52,8 @@ for index in range(start + shard, matches, n_shards):
     team = index % 2
     policy = NumpyHybridPolicy(
         weights, verify_samples=verify_k, top_m=top_m, seed=seed,
-        allocate=allocate, eliminate=eliminate
+        allocate=allocate, eliminate=eliminate,
+        workers=int(os.environ.get("DEEPHOKM_SEARCH_WORKERS", "1")),
     )
     engine = HokmEngine()
     engine.start_match(seed=seed)

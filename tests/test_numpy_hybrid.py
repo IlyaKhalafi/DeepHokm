@@ -9,6 +9,7 @@ weights alone.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch as th
 
 from deephokm.env.spaces import mask_for, observation_for
@@ -255,3 +256,89 @@ def test_elimination_mode_plays_a_full_match_legally() -> None:
         seed=0,
     )
     assert len(play_match(policy, seed=31)) > 13
+
+
+def test_parallel_scoring_picks_identical_actions() -> None:
+    """The worker-process path must reproduce the serial loop exactly.
+
+    Both paths draw the same worlds from the same seeded sampler and run the
+    same elimination and sign test; only where the rollouts execute differs.
+    Any divergence would mean the parallel path is not the measured policy.
+    """
+    th.manual_seed(0)
+    weights = export_weights(RankCNN(channels=TEST_CHANNELS).eval())
+
+    def play(workers: int) -> list[int]:
+        policy = NumpyHybridPolicy(
+            weights, verify_samples=24, eliminate=True, seed=5, workers=workers
+        )
+        engine = HokmEngine()
+        engine.start_match(seed=77)
+        greedy = GreedyPolicy()
+        actions: list[int] = []
+        while len(actions) < 16 and engine.state.winner is None:
+            hands = engine.state.hands
+            seat = engine.current_seat()
+            legal = engine.legal_actions(seat)
+            if hands.phase is Phase.CARD_PLAY and seat in (0, 2):
+                action = policy.decide(engine)
+            else:
+                obs = observation_for(hands, seat, engine.state.game_points)
+                action = greedy.act(obs, mask_for(legal))
+            actions.append(action)
+            led = hands.current_trick[0][1] // 13 if hands.current_trick else None
+            outcome = engine.apply_action(action, seat=seat)
+            if outcome.card is not None:
+                policy.observe(seat, outcome.card, led)
+            if outcome.hand_complete:
+                policy.reset_hand()
+        return actions
+
+    assert play(1) == play(4)
+
+
+def test_parallel_scoring_plays_a_full_match_legally() -> None:
+    th.manual_seed(0)
+    policy = NumpyHybridPolicy(
+        export_weights(RankCNN(channels=TEST_CHANNELS).eval()),
+        verify_samples=8,
+        eliminate=True,
+        seed=1,
+        workers=3,
+    )
+    assert len(play_match(policy, seed=41)) > 13
+
+
+def test_close_terminates_the_worker_pool() -> None:
+    """close() must actually tear down the pool's worker processes.
+
+    A policy is created per web-UI game and discarded on eviction; without
+    a real close() a workers>1 policy leaks its fork children for as long
+    as no one calls it -- this is the regression test for that leak.
+    """
+    th.manual_seed(0)
+    policy = NumpyHybridPolicy(
+        export_weights(RankCNN(channels=TEST_CHANNELS).eval()),
+        verify_samples=8,
+        eliminate=True,
+        seed=2,
+        workers=2,
+    )
+    # Force pool creation without demanding the match run to completion --
+    # play_match() asserts termination, which one decision does not reach.
+    engine = HokmEngine()
+    engine.start_match(seed=5)
+    while engine.state.hands.phase is not Phase.CARD_PLAY:
+        engine.apply_action(engine.legal_actions()[0])
+    policy.decide(engine)
+    pool = policy._pool
+    assert pool is not None, "the pool was never created by a workers>1 decision"
+    policy.close()
+    assert policy._pool is None
+    # A closed pool refuses new work; this is the multiprocessing contract
+    # close() is supposed to establish, not something this test invents.
+    with pytest.raises(ValueError):
+        pool.map(int, [1])
+    # Calling close() again (as a second eviction pass on the same object
+    # could) must not raise.
+    policy.close()

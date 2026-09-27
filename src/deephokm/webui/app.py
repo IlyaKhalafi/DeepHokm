@@ -7,6 +7,7 @@ non-human seats (or all seats in spectate mode).
 
 from __future__ import annotations
 
+import multiprocessing
 import os
 import random as _random
 import threading
@@ -26,6 +27,7 @@ from deephokm.webui.search_serving import (
     load_shared_weights,
     resolve_search_k,
     resolve_weights_path,
+    resolve_workers,
 )
 from deephokm.webui.serving import ServedPolicy, build_opponents, resolve_model_path
 from deephokm.webui.state import (
@@ -55,7 +57,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             f"{resolve_model_path()}; set DEEPHOKM_QNET or DEEPHOKM_MODEL, or set "
             "DEEPHOKM_ALLOW_RANDOM_MODEL=1 for random opponents"
         )
-    yield
+    try:
+        yield
+    finally:
+        pool = getattr(app.state, "search_pool", None)
+        if pool is not None:
+            pool.close()
+            pool.join()
 
 
 app = FastAPI(title="DeepHokm", version="0.1.0", lifespan=lifespan)
@@ -72,6 +80,25 @@ class ActionRequest(BaseModel):
     """Request body for POST /api/games/{id}/action."""
 
     action: int = Field(ge=0, le=NUM_ACTIONS - 1)
+
+
+def _get_search_pool(workers: int) -> multiprocessing.pool.Pool | None:
+    """The one process pool shared by every search-policy instance.
+
+    Created once, memoized on ``app.state``. Forking lazily on the first
+    search decision would fork from inside whatever request thread
+    happened to make that call, and any lock a sibling request thread holds
+    at that instant (loggers, malloc arenas, C-extension globals) would be
+    inherited already held and never released in the child. Creating it
+    here -- called from ``lifespan`` before the server accepts requests --
+    forks from the single main thread instead, before that race can exist.
+    """
+    if workers <= 1:
+        return None
+    if not hasattr(app.state, "search_pool"):
+        app.state.search_pool = multiprocessing.get_context("fork").Pool(workers)
+    pool: multiprocessing.pool.Pool = app.state.search_pool
+    return pool
 
 
 def get_served() -> SearchServedPolicy | ServedPolicy | None:
@@ -93,7 +120,9 @@ def get_served() -> SearchServedPolicy | ServedPolicy | None:
                 # for, and concurrent games would overwrite one another.
                 app.state.weights = load_shared_weights(weights)
                 app.state.model = SearchServedPolicy(
-                    app.state.weights, search_k=resolve_search_k()
+                    app.state.weights, search_k=resolve_search_k(),
+                    workers=resolve_workers(),
+                    pool=_get_search_pool(resolve_workers()),
                 )
             elif os.path.isfile(checkpoint):
                 app.state.model = ServedPolicy(checkpoint)
@@ -106,13 +135,17 @@ def _fresh_policy() -> SearchServedPolicy | ServedPolicy | None:
     """A policy instance for one game.
 
     The search policy is rebuilt per game so that each game owns the engine
-    reference it decides against; the weights behind it are shared. The
-    reinforcement-learning checkpoint is stateless across episodes, so the
-    memoized instance is reused as-is.
+    reference it decides against; the weights and the scorer pool behind it
+    are shared. The reinforcement-learning checkpoint is stateless across
+    episodes, so the memoized instance is reused as-is.
     """
     served = get_served()
     if isinstance(served, SearchServedPolicy):
-        return SearchServedPolicy(app.state.weights, search_k=resolve_search_k())
+        return SearchServedPolicy(
+            app.state.weights, search_k=resolve_search_k(),
+            workers=resolve_workers(),
+            pool=_get_search_pool(resolve_workers()),
+        )
     return served
 
 

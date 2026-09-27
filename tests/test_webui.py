@@ -312,6 +312,35 @@ def test_game_store_eviction() -> None:
     assert store.get(store._games[list(store._games)[0]].id) is not None
 
 
+def test_game_store_eviction_closes_evicted_policies() -> None:
+    """A policy holding a resource (e.g. a search pool) must be released.
+
+    build_opponents puts the SAME policy object in all four opponent slots,
+    so the fix must close each distinct object once, not fail or double-close
+    on the repeats.
+    """
+
+    class ClosableStub:
+        def __init__(self) -> None:
+            self.closed = 0
+
+        def act(self, observation: object, action_mask: np.ndarray) -> int:
+            del observation
+            return int(np.flatnonzero(action_mask)[0])
+
+        def close(self) -> None:
+            self.closed += 1
+
+    store = GameStore(max_games=1)
+    first = ClosableStub()
+    store.create("human", seed=0, opponents=[first, first, first, first])
+    second = ClosableStub()
+    store.create("human", seed=1, opponents=[second, second, second, second])
+
+    assert first.closed == 1, "evicted game's policy was never closed"
+    assert second.closed == 0, "the still-live game's policy must not be closed"
+
+
 def test_served_policy_acts_legally(tmp_path: Path) -> None:
 
     env = HokmEnv(seat=0, opponents=[RandomPolicy(i) for i in range(NUM_SEATS)])

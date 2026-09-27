@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import threading
+from multiprocessing.pool import Pool
 from pathlib import Path
 
 import numpy as np
@@ -54,6 +55,8 @@ class SearchServedPolicy:
         search_k: int = DEFAULT_SEARCH_K,
         eliminate: bool = True,
         seed: int = 0,
+        workers: int = 1,
+        pool: Pool | None = None,
     ) -> None:
         """Build the policy over an already-loaded weight set.
 
@@ -66,10 +69,20 @@ class SearchServedPolicy:
                 measures worse once the search is strong, because an action
                 that is never scored can never be chosen.
             seed: Seed for the world sampler.
+            workers: Parallel scorer processes for the search rounds; the
+                network forward pass itself stays a single-threaded numpy
+                call. Large search budgets stay interactive only with this.
+            pool: An app-owned scorer pool, forked once at server startup
+                before any request thread exists (see
+                :func:`NumpyHybridPolicy.__init__`'s ``pool`` argument for
+                why that timing matters). When given, every per-game policy
+                shares it and ``close()`` on this object is a no-op -- the
+                app closes it once at shutdown instead.
 
         """
         self.policy = NumpyHybridPolicy(
-            weights, verify_samples=search_k, eliminate=eliminate, seed=seed
+            weights, verify_samples=search_k, eliminate=eliminate, seed=seed,
+            workers=workers, pool=pool,
         )
         self.greedy = GreedyPolicy()
         self.engine: HokmEngine | None = None
@@ -77,6 +90,18 @@ class SearchServedPolicy:
     def attach(self, engine: HokmEngine) -> None:
         """Give the policy the live engine the search needs."""
         self.engine = engine
+
+    def close(self) -> None:
+        """Release the underlying policy's scorer pool, if it owns one.
+
+        The web app shares one pool across every game (see the ``pool``
+        argument above), so this is normally a no-op -- the app closes that
+        pool once at shutdown. It only does real work for a policy built
+        without an injected pool, where the game store must still call this
+        on eviction or a ``workers > 1`` policy leaks its own worker
+        processes for as long as the pool object survives.
+        """
+        self.policy.close()
 
     def act(self, observation: Observation, action_mask: np.ndarray) -> int:
         """Return the policy's action for the acting seat.
@@ -157,6 +182,20 @@ def resolve_search_k() -> int:
     return max(1, value)
 
 
+def resolve_workers() -> int:
+    """Return the parallel scorer process count from the environment.
+
+    Defaults to 1 (serial rollouts). Capped at the machine's core count so a
+    typo cannot fork a swarm.
+    """
+    raw = os.environ.get("DEEPHOKM_SEARCH_WORKERS", "1")
+    try:
+        value = int(raw)
+    except ValueError:
+        return 1
+    return max(1, min(value, os.cpu_count() or 1))
+
+
 def describe_policy(policy: SearchServedPolicy | None) -> dict[str, object]:
     """Summarise the served policy for the health endpoint."""
     if policy is None:
@@ -164,6 +203,7 @@ def describe_policy(policy: SearchServedPolicy | None) -> dict[str, object]:
     return {
         "policy": "numpy-qnet+elimination-search",
         "search_k": policy.policy.verify_samples,
+        "search_workers": policy.policy.workers,
         # A hand stops at seven tricks for either team; 13 is the cap, not
         # the length.
         "max_tricks_per_hand": TRICKS_PER_HAND,
@@ -176,4 +216,5 @@ __all__ = [
     "describe_policy",
     "resolve_search_k",
     "resolve_weights_path",
+    "resolve_workers",
 ]

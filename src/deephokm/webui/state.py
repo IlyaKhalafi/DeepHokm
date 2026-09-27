@@ -45,6 +45,20 @@ class GameRecord:
     last_trick_winner: int | None = None
 
 
+def _close_opponents(opponents: list[Any]) -> None:
+    """Release any per-game resources the acting policies were holding.
+
+    ``build_opponents`` puts the same served-policy object in all four
+    seats, so this closes each distinct object once rather than four times.
+    A policy without a ``close`` (the memoized RL checkpoint, RandomPolicy)
+    is simply skipped -- only the search policy owns a process pool.
+    """
+    for policy in {id(p): p for p in opponents}.values():
+        close = getattr(policy, "close", None)
+        if close is not None:
+            close()
+
+
 class GameStore:
     """Thread-safe registry of live games."""
 
@@ -98,6 +112,7 @@ class GameStore:
         """Drop the oldest games when over capacity (caller holds the lock)."""
         while len(self._games) > self._max_games:
             oldest = min(self._games.values(), key=lambda r: r.created_at)
+            _close_opponents(oldest.env.opponents)
             del self._games[oldest.id]
 
 

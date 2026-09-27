@@ -25,6 +25,8 @@ play.
 
 from __future__ import annotations
 
+import multiprocessing
+import pickle
 import random
 from pathlib import Path
 
@@ -59,6 +61,62 @@ MIN_DRAWS_TO_ELIMINATE = 2  # a variance estimate needs at least two samples
 MIN_BUDGET_SHARE = 0.25
 
 
+def _score_pair(
+    task: tuple[bytes, int, int, int, int, list[list[int]], int],
+) -> tuple[float, float]:
+    """Score (candidate, baseline) in one sampled world (worker process).
+
+    Returns the paired outcomes the sign test compares, so the test's
+    world-level pairing is preserved exactly as in the serial loop.
+    """
+    engine_bytes, seat, team, candidate, baseline, world, seed = task
+    engine = pickle.loads(engine_bytes)
+    clone_rng = random.Random(seed)
+    value_c = _action_value(
+        engine, seat, candidate, team=team, world=world, rng=clone_rng
+    )
+    value_b = _action_value(
+        engine, seat, baseline, team=team, world=world, rng=clone_rng
+    )
+    return value_c, value_b
+
+
+def _score_batch(
+    task: tuple[bytes, int, int, list[list[int]], list[int], int],
+) -> list[float]:
+    """Score every listed action in one sampled world (worker process).
+
+    The engine travels as a pickle because the worker is a fresh process;
+    the clone built from it is thrown away with the result. ``seed`` keeps
+    the clone's rollout RNG independent across workers without any shared
+    state.
+    """
+    engine_bytes, seat, team, world, actions, seed = task
+    engine = pickle.loads(engine_bytes)
+    clone_rng = random.Random(seed)
+    return [
+        _action_value(engine, seat, action, team=team, world=world, rng=clone_rng)
+        for action in actions
+    ]
+
+
+def _action_value(
+    engine: HokmEngine,
+    seat: int,
+    action: int,
+    *,
+    team: int,
+    world: list[list[int]],
+    rng: random.Random,
+) -> float:
+    """Outcome of ``action`` in one sampled world (module level, picklable)."""
+    clone = _clone_for_simulation(engine, seat, world, rng=rng)
+    outcome = clone.apply_action(action, seat=seat)
+    if outcome.hand_complete:
+        return 1.0 if outcome.hand_winner_team == team else -1.0
+    return oracle_ceiling(clone, team, depth=1, rng=rng)
+
+
 class NumpyHybridPolicy:
     """Greedy by default; network proposals confirmed by a sign test.
 
@@ -67,6 +125,9 @@ class NumpyHybridPolicy:
         verify_samples: Determinized worlds drawn per proposal.
         top_m: How many of the network's best actions to propose.
         max_p_value: One-sided sign-test threshold for accepting a proposal.
+        workers: Parallel scorer processes for elimination rounds; 1 keeps
+            the serial loop (the rollouts are pure Python, so this is the
+            only way a large verify budget stays interactive).
         greedy: The scripted baseline that proposals must beat.
         voids: Suit voids inferred from public play.
     """
@@ -76,12 +137,14 @@ class NumpyHybridPolicy:
         weights: Path | dict[str, np.ndarray],
         *,
         verify_samples: int = DEFAULT_VERIFY_SAMPLES,
+        workers: int = 1,
         top_m: int = DEFAULT_TOP_M,
         max_p_value: float = DEFAULT_MAX_P_VALUE,
         seed: int = 0,
         allocate: bool = False,
         eliminate: bool = False,
         temperature: float = DEFAULT_TEMPERATURE,
+        pool: multiprocessing.pool.Pool | None = None,
     ) -> None:
         """Create the policy.
 
@@ -99,6 +162,17 @@ class NumpyHybridPolicy:
                 full search would choose before it has been scored.
             temperature: Softmax temperature for that split; lower
                 concentrates more budget on the network's favourites.
+            pool: An externally owned scorer pool to reuse instead of
+                creating a private one. Pass this from a long-lived,
+                multithreaded host (the web server): forking a pool lazily,
+                the first time a request thread happens to call ``decide``,
+                forks the whole process from inside that thread, and any
+                lock another request thread holds at that instant (loggers,
+                malloc arenas, C-extension globals) is inherited already
+                held and never released in the child. A pool forked once
+                from the main thread before request handling starts has no
+                such thread to race against. Callers that pass a pool own
+                its lifetime; ``close()`` on this policy is then a no-op.
         """
         params = load_weights(weights) if isinstance(weights, Path) else weights
         self.net = NumpyQNet(params)
@@ -107,10 +181,36 @@ class NumpyHybridPolicy:
         self.max_p_value = max_p_value
         self.allocate = allocate
         self.eliminate = eliminate
+        self.workers = workers
+        # Worker-process rollout seeds. Deliberately NOT self._rng: the
+        # serial path consumes no randomness beyond world sampling, so the
+        # parallel path must not either, or the two paths diverge in the
+        # worlds they draw from the same seed.
+        self._worker_seed_rng = random.Random(seed ^ 0x5EED)
         self.temperature = temperature
         self.greedy = GreedyPolicy()
         self.voids = VoidTracker()
         self._rng = random.Random(seed)
+        # A lazily self-created pool (used by every harness and test script,
+        # which are single-threaded top-level programs with no fork-safety
+        # concern) is closed on close(); an injected one is not -- its
+        # owner controls that.
+        self._pool = pool
+        self._owns_pool = pool is None
+        self._pool_ctx = multiprocessing.get_context("fork")
+
+    def close(self) -> None:
+        """Release the scorer pool, if this policy owns one."""
+        if self._owns_pool and self._pool is not None:
+            self._pool.close()
+            self._pool.join()
+            self._pool = None
+
+    def _scorer_pool(self) -> multiprocessing.pool.Pool:
+        """The scorer pool for this policy: injected, or created on demand."""
+        if self._pool is None:
+            self._pool = self._pool_ctx.Pool(self.workers)
+        return self._pool
 
     def reset_hand(self) -> None:
         """Forget inferred voids; call at the start of every hand."""
@@ -243,20 +343,43 @@ class NumpyHybridPolicy:
         # redeal, into state that is discarded.
         clone_rng = random.Random()
         wins_candidate = wins_baseline = 0
-        for _ in range(self.verify_samples):
-            world = sample_determinized_hands(
-                seat, own_hand, unseen, sizes, voids=self.voids.voids, rng=self._rng
-            )
-            value_c = self._value(
-                engine, seat, candidate, team=team, world=world, clone_rng=clone_rng
-            )
-            value_b = self._value(
-                engine, seat, baseline, team=team, world=world, clone_rng=clone_rng
-            )
-            if value_c > value_b:
-                wins_candidate += 1
-            elif value_b > value_c:
-                wins_baseline += 1
+        if self.workers > 1:
+            # Same paired sign test, scored in parallel: one task per world,
+            # both actions inside the task so each worker's two rollouts see
+            # the identical determinization the serial loop would.
+            engine_bytes = pickle.dumps(engine)
+            worlds = [
+                sample_determinized_hands(
+                    seat, own_hand, unseen, sizes, voids=self.voids.voids, rng=self._rng
+                )
+                for _ in range(self.verify_samples)
+            ]
+            seed_base = self._worker_seed_rng.randrange(2**30)
+            tasks = [
+                (engine_bytes, seat, team, candidate, baseline, world, seed_base + i)
+                for i, world in enumerate(worlds)
+            ]
+            pairs = self._scorer_pool().map(_score_pair, tasks, chunksize=1)
+            for value_c, value_b in pairs:
+                if value_c > value_b:
+                    wins_candidate += 1
+                elif value_b > value_c:
+                    wins_baseline += 1
+        else:
+            for _ in range(self.verify_samples):
+                world = sample_determinized_hands(
+                    seat, own_hand, unseen, sizes, voids=self.voids.voids, rng=self._rng
+                )
+                value_c = self._value(
+                    engine, seat, candidate, team=team, world=world, clone_rng=clone_rng
+                )
+                value_b = self._value(
+                    engine, seat, baseline, team=team, world=world, clone_rng=clone_rng
+                )
+                if value_c > value_b:
+                    wins_candidate += 1
+                elif value_b > value_c:
+                    wins_baseline += 1
         discordant = wins_candidate + wins_baseline
         return _sign_test_p_value(wins_candidate, discordant) <= self.max_p_value
 
@@ -312,20 +435,44 @@ class NumpyHybridPolicy:
         # accumulating: comparing raw totals would rank actions by how long they
         # survived rather than by how well they scored.
         counts = dict.fromkeys(survivors, 0)
+        n_workers = self.workers
+        use_pool = n_workers > 1 and per_round >= n_workers
+        engine_bytes = pickle.dumps(engine) if use_pool else b""
         for _ in range(ELIMINATION_ROUNDS):
             if len(survivors) <= 1:
                 break
-            for _ in range(per_round):
-                world = sample_determinized_hands(
+            worlds = [
+                sample_determinized_hands(
                     seat, own_hand, unseen, sizes, voids=self.voids.voids, rng=self._rng
                 )
-                for action in survivors:
-                    value = self._value(
-                        engine, seat, action, team=team, world=world, clone_rng=clone_rng
-                    )
-                    totals[action] += value
-                    squares[action] += value * value
-                    counts[action] += 1
+                for _ in range(per_round)
+            ]
+            if use_pool:
+                # One task per world; each worker scores every surviving
+                # action in its world, so world-level variance cancels
+                # exactly as it does in the serial loop.
+                seed_base = self._worker_seed_rng.randrange(2**30)
+                tasks = [
+                    (engine_bytes, seat, team, world, list(survivors), seed_base + i)
+                    for i, world in enumerate(worlds)
+                ]
+                for values in self._scorer_pool().map(
+                    _score_batch, tasks, chunksize=1
+                ):
+                    for action, value in zip(survivors, values, strict=True):
+                        totals[action] += value
+                        squares[action] += value * value
+                        counts[action] += 1
+            else:
+                for world in worlds:
+                    for action in survivors:
+                        value = self._value(
+                            engine, seat, action, team=team, world=world,
+                            clone_rng=clone_rng,
+                        )
+                        totals[action] += value
+                        squares[action] += value * value
+                        counts[action] += 1
             survivors = self._survivors(survivors, totals, squares, counts, baseline)
 
         best = max(survivors, key=lambda a: totals[a] / counts[a])
