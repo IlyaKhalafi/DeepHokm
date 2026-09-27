@@ -4,10 +4,17 @@ Running the web UI locally, in Docker, and the configuration surface.
 
 ![DeepHokm web UI](media/board.png)
 
-The served policy is the numpy action-value network guiding the determinized
-search. `DEEPHOKM_SEARCH_K` sets how many worlds each decision samples, trading
-latency for strength; the default keeps a decision well under a second.
-`DEEPHOKM_QNET` points at the weight archive.
+The served policy is the numpy action-value network. `DEEPHOKM_QNET` points
+at the weight archive; `DEEPHOKM_SEARCH_K` (default `0`) sets how many
+determinized worlds each decision samples from a live search paired with
+the network, trading latency for strength -- `0` is the network alone (no
+search, no rollouts, an 18 ms decision, 0.663 against a greedy opposing
+team); raising it past `0` adds live search on top of the same weights (3072
+reaches the measured ceiling of 0.855, at seconds per decision --
+`DEEPHOKM_SEARCH_WORKERS` parallelizes the rollouts to keep that
+interactive). The K used to generate this network's own training labels
+(up to 6144, see `METHODS_AND_RESULTS.md`) is a separate, offline,
+one-time cost that never runs at serve time regardless of this setting.
 
 ```bash
 make webui            # serves on ${DEEPHOKM_PORT}

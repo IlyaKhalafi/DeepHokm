@@ -32,11 +32,15 @@ from deephokm.env.spaces import Observation
 from deephokm.nn.numpy_qnet import load_weights
 from deephokm.policies.greedy_policy import GreedyPolicy
 from deephokm.policies.numpy_hybrid import NumpyHybridPolicy
+from deephokm.policies.pure_qnet_policy import PureQNetPolicy
 from deephokm.rules.engine import HokmEngine
 from deephokm.rules.state import NUM_SEATS, TRICKS_PER_HAND, Phase
 
 DEFAULT_WEIGHTS = "checkpoints/qnet_numpy_full.npz"
-DEFAULT_SEARCH_K = 48
+# 0: serve the network alone, no live search (see resolve_search_k). Search
+# is what the offline teacher labels this network trained on used, not what
+# runs at play time; raising this past 0 opts into live search instead.
+DEFAULT_SEARCH_K = 0
 
 
 class SearchServedPolicy:
@@ -63,27 +67,42 @@ class SearchServedPolicy:
         Args:
             weights: Weight arrays, shared read-only across games.
             search_k: Sampled worlds per decision; higher is stronger and
-                slower.
+                slower. Zero serves the network alone -- no live search, no
+                rollouts, a plain argmax over the legal actions' values.
+                Measured at 0.6625 against a greedy opposing team (well below
+                the search-paired policy's 0.855) but a median 18 ms per
+                decision. Raising K past zero always means live search: the
+                offline search used to generate this network's own training
+                labels (K up to 6144, see
+                ``docs/METHODS_AND_RESULTS.md``) is a separate, one-time cost
+                that never runs at serve time.
             eliminate: Score every legal action and drop only those the
                 evidence rules out. Pruning to the network's favourites
                 measures worse once the search is strong, because an action
-                that is never scored can never be chosen.
-            seed: Seed for the world sampler.
+                that is never scored can never be chosen. Unused when
+                ``search_k`` is 0.
+            seed: Seed for the world sampler. Unused when ``search_k`` is 0.
             workers: Parallel scorer processes for the search rounds; the
                 network forward pass itself stays a single-threaded numpy
                 call. Large search budgets stay interactive only with this.
+                Unused when ``search_k`` is 0.
             pool: An app-owned scorer pool, forked once at server startup
                 before any request thread exists (see
                 :func:`NumpyHybridPolicy.__init__`'s ``pool`` argument for
                 why that timing matters). When given, every per-game policy
                 shares it and ``close()`` on this object is a no-op -- the
-                app closes it once at shutdown instead.
+                app closes it once at shutdown instead. Unused when
+                ``search_k`` is 0.
 
         """
-        self.policy = NumpyHybridPolicy(
-            weights, verify_samples=search_k, eliminate=eliminate, seed=seed,
-            workers=workers, pool=pool,
-        )
+        self.policy: NumpyHybridPolicy | PureQNetPolicy
+        if search_k <= 0:
+            self.policy = PureQNetPolicy(weights)
+        else:
+            self.policy = NumpyHybridPolicy(
+                weights, verify_samples=search_k, eliminate=eliminate, seed=seed,
+                workers=workers, pool=pool,
+            )
         self.greedy = GreedyPolicy()
         self.engine: HokmEngine | None = None
 
@@ -173,13 +192,17 @@ def resolve_weights_path() -> str:
 
 
 def resolve_search_k() -> int:
-    """Return the per-decision world count from the environment."""
+    """Return the per-decision world count from the environment.
+
+    Zero (the default) means the served policy is the network alone, with
+    no live search; see :class:`SearchServedPolicy`'s ``search_k`` argument.
+    """
     raw = os.environ.get("DEEPHOKM_SEARCH_K", str(DEFAULT_SEARCH_K))
     try:
         value = int(raw)
     except ValueError:
         return DEFAULT_SEARCH_K
-    return max(1, value)
+    return max(0, value)
 
 
 def resolve_workers() -> int:
@@ -200,14 +223,23 @@ def describe_policy(policy: SearchServedPolicy | None) -> dict[str, object]:
     """Summarise the served policy for the health endpoint."""
     if policy is None:
         return {"policy": "greedy-baseline", "search_k": 0}
-    return {
-        "policy": "numpy-qnet+elimination-search",
-        "search_k": policy.policy.verify_samples,
-        "search_workers": policy.policy.workers,
-        # A hand stops at seven tricks for either team; 13 is the cap, not
-        # the length.
-        "max_tricks_per_hand": TRICKS_PER_HAND,
-    }
+    inner = policy.policy
+    if isinstance(inner, PureQNetPolicy):
+        payload: dict[str, object] = {
+            "policy": "numpy-qnet-only",
+            "search_k": 0,
+            "search_workers": 0,
+        }
+    else:
+        payload = {
+            "policy": "numpy-qnet+elimination-search",
+            "search_k": inner.verify_samples,
+            "search_workers": inner.workers,
+        }
+    # A hand stops at seven tricks for either team; 13 is the cap, not the
+    # length.
+    payload["max_tricks_per_hand"] = TRICKS_PER_HAND
+    return payload
 
 
 __all__ = [

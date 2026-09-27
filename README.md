@@ -4,14 +4,17 @@
 convolutional action-value network guiding a determinized search.
 
 Beats a scripted greedy opponent in **85.5%** of matches (399 held-out matches,
-95% CI [0.820, 0.889]).
+95% CI [0.820, 0.889]) when paired with a live determinized search. The
+default deployment serves the network alone instead -- no search, no
+rollouts, an 18 ms decision -- which measures **66.3%** (80 held-out matches,
+95% CI [0.559, 0.766]). Both are the same trained weights; search is a
+deployment choice traded against latency, not a different model (see
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) to enable it).
 
 **No deep-learning framework at play time.** Inference is numpy; PyTorch
 trains the network and converts its weights, and is a development dependency
-only. The network's forward pass costs 30 ms; the search wrapped around it
-trades that for strength, configurable per deployment (see
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)). Torch-free inference is enforced
-by a test that blocks the import and plays a match anyway.
+only. Torch-free inference is enforced by a test that blocks the import and
+plays a match anyway.
 
 ![DeepHokm web UI](docs/media/demo.gif)
 
@@ -59,13 +62,15 @@ led to the next are in [the methods write-up](docs/METHODS_AND_RESULTS.md).
 | policy | win rate vs greedy | matches | cost |
 |---|---|---|---|
 | Scripted greedy baseline | 0.500 | — | — |
+| **Network alone, no search (default deployment)** | **0.663** | **80 ‡** | **18 ms** |
 | Search alone, K=48 | 0.570 | 200 † | 1/64 of the budget below |
 | Network + search, K=48 | 0.713 | 122 † | same budget |
 | Search alone, K=3072 | 0.852 | 128 † | no network |
-| **Network + elimination search, K=3072** | **0.855** | **399 ‡** | 30 ms network + search |
+| Network + elimination search, K=3072 | 0.855 | 399 ‡ | 30 ms network + seconds of search |
 
 ‡ held-out seeds, disjoint from everything used to choose the model or its
-settings; 95% CI [0.820, 0.889].
+settings; 95% CI [0.820, 0.889] for the search-paired row, [0.559, 0.766] for
+the network-alone row.
 † measured during development on the seed sets used for tuning, so these are
 indicative rather than held-out.
 

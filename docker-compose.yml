@@ -14,7 +14,7 @@ services:
     environment:
       DEEPHOKM_PORT: ${DEEPHOKM_PORT}
       DEEPHOKM_QNET: /app/checkpoints/qnet_numpy_full.npz
-      DEEPHOKM_SEARCH_K: ${DEEPHOKM_SEARCH_K:-48}
+      DEEPHOKM_SEARCH_K: ${DEEPHOKM_SEARCH_K:-0}
       DEEPHOKM_SEARCH_WORKERS: ${DEEPHOKM_SEARCH_WORKERS:-1}
     env_file:
       - .env

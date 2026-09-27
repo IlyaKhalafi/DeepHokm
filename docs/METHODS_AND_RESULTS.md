@@ -766,8 +766,9 @@ apply whichever standard they prefer.
 0.852 and the hybrid's lift over it is +0.003 -- parity. So the correct claim is
 that *a policy containing a 30 ms numpy network clears 80%*, with the search
 supplying the strength and the network supplying candidate ordering and speed.
-It is not a network that plays at 85% on its own; section 19 shows why nothing
-in this family can exceed the search it wraps.
+It is not a network that plays at 85% on its own -- section 19 argues why
+nothing in this family can exceed the search it wraps, and section 24 measures
+the network alone directly: 0.6625, not 0.855.
 
 The network's own measured contribution is efficiency at small search budgets:
 0.713 against the search's 0.570 at K=48, a 14pp gain for one sixty-fourth of
@@ -825,9 +826,51 @@ request, and any lock a sibling request thread holds at that exact instant
 (a logger, a malloc arena, a C-extension global) is inherited already held
 and never released in the child.
 
-The documented default (`DEEPHOKM_SEARCH_K=48`, `DEEPHOKM_SEARCH_WORKERS=1`,
-see [`DEPLOYMENT.md`](DEPLOYMENT.md)) is unchanged -- it is the setting that
-needs no spare cores to stay interactive. Raising both is now a config
-change rather than a rewrite: a machine with cores to spare can serve the
-measured 0.855 policy directly instead of the smaller single-threaded
-budget.
+Raising `DEEPHOKM_SEARCH_K`/`DEEPHOKM_SEARCH_WORKERS` (see
+[`DEPLOYMENT.md`](DEPLOYMENT.md)) is now a config change rather than a
+rewrite: a machine with cores to spare can serve the measured 0.855 policy
+directly instead of paying for it with a rewrite of the serving path.
+Section 24 covers what the *default* configuration actually is, and why.
+
+## 24. What the server plays by default, and why K stays offline
+
+Every K value in this document up to here describes either the offline
+teacher (K up to 6144, generating the labels this network trained on -- a
+one-time cost, done once, never repeated at play time) or a live search
+paired with the network at serve time (K up to 3072, section 23). Those are
+two different uses of the same knob, and conflating them is the natural
+mistake: the network's own training data used K=3072, so it is reasonable to
+expect the network alone to inherit something close to that strength. It
+does not.
+
+Measured directly -- the network alone, argmax over the legal actions'
+values, zero rollouts, zero live search, trump call deferring to
+`GreedyPolicy` exactly as the search-paired policy does:
+
+| | win rate | matches | median latency |
+|---|---|---|---|
+| Network alone (default deployment) | 0.6625 | 80 ‡ | 18 ms |
+| Network + elimination search, K=3072 | 0.855 | 399 ‡ | seconds |
+
+‡ held-out seeds, disjoint from every run used to choose the model or its
+settings.
+
+The gap is the same fact section 19 already establishes, now with a number
+attached: the network is a compressed model of what the K=3072 *search*
+decides, not of what wins matches on its own, and a compressed model of a
+noisy teacher cannot exceed the teacher's own self-agreement ceiling
+(0.741 on decisive decisions, section 16) -- let alone the search's full
+strength, which draws on rollouts the network never sees at play time.
+0.6625 sits close to that self-agreement ceiling once the ~200 compounding
+decisions per match are accounted for; it is not evidence of an undertrained
+network. Two things were checked directly before accepting that: doubling
+capacity (RankCNN 6.4M to 12.9M parameters, same labels) moved held-out
+optimal-set accuracy from 0.6612 to 0.6626 -- noise, not a trend -- and
+training longer at fixed data overfits past its val-set peak (train accuracy
+reaches 0.93-0.99 while val plateaus), which is exactly why the training
+script keeps the best-on-val checkpoint rather than the final epoch's.
+
+`DEEPHOKM_SEARCH_K` therefore defaults to `0`: the network alone, 18 ms,
+0.6625. Setting it above `0` is how a deployment opts into the search-paired
+policy's strength at the search's latency cost, not a different model --
+same weights either way.
