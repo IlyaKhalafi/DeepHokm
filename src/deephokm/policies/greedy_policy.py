@@ -116,8 +116,16 @@ class GreedyPolicy:
         is taken from the seat that led — the played seat whose predecessor
         has not played. ``played`` has at most 4 entries, so both the leader
         check and the play-order walk are plain loops; no set or sort.
+
+        Every real caller passes a partial trick (at most 3 entries: the
+        acting seat's own card is not yet in ``played``), so some seat's
+        predecessor is always missing from the list and a leader is always
+        found. A full 4-entry trick has no such seat -- every predecessor is
+        present -- so that case raises rather than silently guessing seat 0,
+        matching what the original set-based lookup (``next(...)`` with no
+        default) did before this loop replaced it.
         """
-        leader = played[0][0]
+        leader = None
         for s, _ in played:
             is_leader = True
             for s2, _ in played:
@@ -127,6 +135,11 @@ class GreedyPolicy:
             if is_leader:
                 leader = s
                 break
+        if leader is None:
+            raise ValueError(
+                f"no leader in {played}: every predecessor seat has played, "
+                "which means this is a full trick, not a partial one"
+            )
         by_seat = dict(played)
         best_seat, best_card = leader, by_seat[leader]
         for step in range(1, len(played)):

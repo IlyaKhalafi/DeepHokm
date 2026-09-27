@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 import numpy as np
+import pytest
 
 from deephokm.env.hokm_env import HokmEnv
 from deephokm.env.spaces import Observation, empty_observation
@@ -201,3 +202,15 @@ def test_greedy_policy_beats_random_by_a_wide_margin() -> None:
         wins += int(env.engine.state.winner == team_of(0))
         env.close()
     assert wins / games > 0.8, f"greedy won only {wins}/{games} against random play"
+
+
+def test_current_best_rejects_a_full_trick_instead_of_guessing() -> None:
+    """A partial trick always has a seat with no predecessor in it -- that
+    seat is the leader. A full 4-entry trick has none (every predecessor has
+    played too), which never happens through a real call site (the acting
+    seat's own card is never in ``played`` yet), so this must fail loudly
+    rather than silently default to seat 0.
+    """
+    played = [(0, 5), (1, 6), (2, 7), (3, 8)]
+    with pytest.raises(ValueError, match="no leader"):
+        GreedyPolicy._current_best(played, trump=None)
