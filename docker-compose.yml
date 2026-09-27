@@ -7,13 +7,15 @@ services:
     build:
       context: .
       args:
-        MODEL_PATH: ${DEEPHOKM_MODEL:-checkpoints/final.zip}
+        QNET_PATH: ${DEEPHOKM_QNET:-checkpoints/qnet_numpy_full.npz}
     image: deephokm-web:latest
     ports:
       - "${DEEPHOKM_PORT}:${DEEPHOKM_PORT}"
     environment:
       DEEPHOKM_PORT: ${DEEPHOKM_PORT}
-      DEEPHOKM_MODEL: /app/checkpoints/final.zip
+      DEEPHOKM_QNET: /app/checkpoints/qnet_numpy_full.npz
+      DEEPHOKM_SEARCH_K: ${DEEPHOKM_SEARCH_K:-48}
+      DEEPHOKM_SEARCH_WORKERS: ${DEEPHOKM_SEARCH_WORKERS:-1}
     env_file:
       - .env
     # The service is stateless: it loads a checkpoint and serves. Giving it a
@@ -22,11 +24,11 @@ services:
     tmpfs:
       - /tmp
     volumes:
-      # Host checkpoint mounted read-only over the baked-in one, so a new
+      # Host weights mounted read-only over the baked-in ones, so a new
       # model can be served without rebuilding. The default is the repository
-      # checkpoint the image was built from, which makes the mount a no-op
+      # weights the image was built from, which makes the mount a no-op
       # rather than a requirement; relative paths resolve against this file.
-      - ${DEEPHOKM_MODEL_PATH:-./checkpoints/final.zip}:/app/checkpoints/final.zip:ro
+      - ${DEEPHOKM_MODEL_PATH:-./checkpoints/qnet_numpy_full.npz}:/app/checkpoints/qnet_numpy_full.npz:ro
     # No GPU device reservation: ServedPolicy always runs inference on CPU
     # (batch-1 calls are faster there than a GPU round-trip; see
     # src/deephokm/webui/serving.py). A mandatory `deploy.resources.

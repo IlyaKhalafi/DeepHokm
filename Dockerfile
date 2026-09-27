@@ -2,7 +2,7 @@
 #
 # The GPU device id, listen port, and model path all come from the
 # environment (see .env.example); nothing deployment-specific is baked in
-# beyond the optional MODEL_PATH build arg.
+# beyond the optional QNET_PATH build arg.
 
 FROM ghcr.io/astral-sh/uv:python3.11-bookworm AS builder
 
@@ -32,17 +32,21 @@ COPY --from=builder /app/.venv /app/.venv
 COPY src ./src
 COPY README.md pyproject.toml ./
 
-# The trained checkpoint is baked in via MODEL_PATH (a repo-relative path),
-# and can be overridden at run time by a read-only bind mount.
-ARG MODEL_PATH=checkpoints/final.zip
-COPY ${MODEL_PATH} /app/checkpoints/final.zip
+# The served weights are baked in via QNET_PATH (a repo-relative path), and
+# can be overridden at run time by a read-only bind mount. This is the numpy
+# action-value network guiding the determinized search -- the measured
+# policy (0.855 win rate against a greedy opposing team) -- not the earlier
+# MaskablePPO checkpoint, which plateaued at the level of a greedy clone and
+# is kept only as a fallback the served app never reaches for by default.
+ARG QNET_PATH=checkpoints/qnet_numpy_full.npz
+COPY ${QNET_PATH} /app/checkpoints/qnet_numpy_full.npz
 
 # The listen port is deployment configuration: it arrives as DEEPHOKM_PORT at
 # run time (compose / --env-file / -e) and is never baked in, so the image
 # carries no EXPOSE literal either.
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
-    DEEPHOKM_MODEL=/app/checkpoints/final.zip
+    DEEPHOKM_QNET=/app/checkpoints/qnet_numpy_full.npz
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
     CMD curl -fs "http://127.0.0.1:${DEEPHOKM_PORT}/health" || exit 1

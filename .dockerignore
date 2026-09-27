@@ -9,6 +9,7 @@ tests/
 .gitignore
 logs/
 checkpoints/*
+!checkpoints/qnet_numpy_full.npz
 !checkpoints/final.zip
 figures/
 .mypy_cache/

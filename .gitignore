@@ -220,7 +220,8 @@ __marimo__/
 # DeepHokm project artifacts
 *.local.md
 logs/
-checkpoints/
+checkpoints/*
+!checkpoints/qnet_numpy_full.npz
 figures/
 
 # Scratch experiment datasets (large pickles, regenerable)

@@ -38,27 +38,30 @@ docker run --rm -p "${DEEPHOKM_PORT}:${DEEPHOKM_PORT}" --tmpfs /tmp \
   --env-file .env deephokm-web:latest
 ```
 
-The image is a multi-stage uv build. The trained checkpoint is baked in from
-`checkpoints/final.zip` — copy (or symlink) the checkpoint you want to serve
-there before building:
+The image is a multi-stage uv build. The numpy Q-network weights
+(`checkpoints/qnet_numpy_full.npz`, committed to the repository) are baked
+in by default — the same file `make webui` serves locally, so a fresh
+`docker compose up --build` plays at the measured 0.855 win rate out of the
+box. To bake a different weight archive instead, set `DEEPHOKM_QNET` in
+`.env` to its repo-relative path before building.
 
-```bash
-cp checkpoints/<run>/checkpoints/ppo_<step>_steps.zip checkpoints/final.zip
-```
-
-At run time a read-only bind mount can override the baked checkpoint: set
+At run time a read-only bind mount can override the baked weights: set
 `DEEPHOKM_MODEL_PATH` in `.env` (absolute or relative to the compose file;
-it defaults to the repository's own `checkpoints/final.zip`, so the mount is
-a no-op override rather than a requirement). The container never reserves a
-GPU device at all: `ServedPolicy` always runs inference on CPU (batch-1
-calls are faster there than a GPU round-trip; see
-`src/deephokm/webui/serving.py`), so a mandatory device reservation would
-only break `docker compose up` on a machine with no nvidia container
-runtime for no benefit. `DEEPHOKM_GPU_DEVICE_ID` still pins bare-metal
-training and the dev web UI server (`make train`, `make webui`) to GPU 6 via
-`CUDA_VISIBLE_DEVICES`; it plays no role in the container. The container
-runs as an unprivileged user with a RAM-backed `/tmp` and writes nothing
-durable, so the only host state it needs is the mounted checkpoint.
+it defaults to the repository's own `checkpoints/qnet_numpy_full.npz`, so
+the mount is a no-op override rather than a requirement). The container
+never reserves a GPU device at all: numpy inference runs on CPU in ~30 ms
+regardless (see `src/deephokm/nn/numpy_qnet.py`), so a mandatory device
+reservation would only break `docker compose up` on a machine with no
+nvidia container runtime for no benefit. `DEEPHOKM_GPU_DEVICE_ID` still pins
+bare-metal training and the dev web UI server (`make train`, `make webui`)
+to GPU 6 via `CUDA_VISIBLE_DEVICES`; it plays no role in the container. The
+container runs as an unprivileged user with a RAM-backed `/tmp` and writes
+nothing durable, so the only host state it needs is the mounted weights.
+
+The earlier MaskablePPO checkpoint (`checkpoints/final.zip`) is not baked
+into the image; it plateaued at the level of a greedy clone during
+training (see [`METHODS_AND_RESULTS.md`](METHODS_AND_RESULTS.md)) and the
+served app only falls back to it if the numpy weights are absent.
 
 
 ## Configuration
