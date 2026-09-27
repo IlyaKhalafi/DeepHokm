@@ -8,8 +8,10 @@ Beats a scripted greedy opponent in **85.5%** of matches (399 held-out matches,
 
 **No deep-learning framework at play time.** Inference is numpy; PyTorch
 trains the network and converts its weights, and is a development dependency
-only. A decision costs 30 ms. This is enforced by a test that blocks the torch
-import and plays a match anyway.
+only. The network's forward pass costs 30 ms; the search wrapped around it
+trades that for strength, configurable per deployment (see
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)). Torch-free inference is enforced
+by a test that blocks the import and plays a match anyway.
 
 ![DeepHokm web UI](docs/media/demo.gif)
 

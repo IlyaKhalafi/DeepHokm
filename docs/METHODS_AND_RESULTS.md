@@ -792,3 +792,42 @@ Three changes mattered, in order of effect:
 
 Architecture was not the lever: six variants spanning 377k to 8M parameters
 landed in one band, and a structure-free MLP matched the transformer.
+
+## 23. Serving K=3072 live: parallelizing the rollouts
+
+Section 17's cost table (K=3072, 3.4 h CPU per match) describes label
+*generation*: many matches run to completion end to end, unattended.
+Serving one live decision is a different problem -- only the rollouts for
+the acting seat's next move, not a whole match -- but single-threaded that
+was still 16 s at K=3072, far past the web UI's interactivity budget.
+
+Every rollout draws an independent determinized world, so the elimination
+rounds and the final sign test now farm their rollouts out to a
+`multiprocessing` pool instead of a Python loop. This cuts a K=3072
+decision to 3-4 s at six workers; the network forward pass supplying the
+initial ordering is unaffected (still ~30 ms, still numpy, still the
+single-threaded call it always was).
+
+Correctness does not rest on re-running the whole evaluation: the parallel
+path draws its worker seeds from a dedicated RNG that the serial path never
+touches, so both consume identical randomness from an identical seed and
+pick identical actions -- verified directly by a test that runs both paths
+side by side on the same seeds and diffs their action sequences. A held-out
+confirmation run is in progress regardless (fresh seeds, disjoint from every
+number above): 124/145 matches so far, 0.855, consistent with the registered
+0.8546.
+
+The pool itself is forked once, from the server's single main thread before
+it starts accepting requests, and shared by every game rather than owned per
+policy instance. Forking lazily on the first request that happens to need
+it would fork the whole process from inside whatever thread served that
+request, and any lock a sibling request thread holds at that exact instant
+(a logger, a malloc arena, a C-extension global) is inherited already held
+and never released in the child.
+
+The documented default (`DEEPHOKM_SEARCH_K=48`, `DEEPHOKM_SEARCH_WORKERS=1`,
+see [`DEPLOYMENT.md`](DEPLOYMENT.md)) is unchanged -- it is the setting that
+needs no spare cores to stay interactive. Raising both is now a config
+change rather than a rewrite: a machine with cores to spare can serve the
+measured 0.855 policy directly instead of the smaller single-threaded
+budget.
