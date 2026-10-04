@@ -94,7 +94,5 @@ follow-up (70 and 72 paired games respectively, combining both batches)
 did not hold up: 37/70 (0.53) vs. plain — essentially a coin flip — and
 32/72 (0.44) vs. greedy — behind the plain policy. At this setting, search
 does not reliably improve on the trained network and plausibly hurts
-slightly against a disciplined opponent; see `REVIEW_LOG.local.md` for two
-untested hypotheses why. Treat this as an unproven experiment, not a
+slightly against a disciplined opponent. Treat this as an unproven experiment, not a
 shipped improvement.
-

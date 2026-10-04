@@ -8,6 +8,8 @@ weights alone.
 
 from __future__ import annotations
 
+import multiprocessing
+
 import numpy as np
 import pytest
 import torch as th
@@ -30,9 +32,7 @@ TEST_SAMPLES = 4
 def make_policy(seed: int = 0) -> NumpyHybridPolicy:
     th.manual_seed(0)
     weights = export_weights(RankCNN(channels=TEST_CHANNELS).eval())
-    return NumpyHybridPolicy(
-        weights, verify_samples=TEST_SAMPLES, top_m=3, seed=seed
-    )
+    return NumpyHybridPolicy(weights, verify_samples=TEST_SAMPLES, top_m=3, seed=seed)
 
 
 def play_match(policy: NumpyHybridPolicy, seed: int, max_actions: int = 4000) -> list[int]:
@@ -51,7 +51,6 @@ def play_match(policy: NumpyHybridPolicy, seed: int, max_actions: int = 4000) ->
         if seat in controlled:
             action = policy.decide(engine)
         else:
-
             obs = observation_for(hands, seat, engine.state.game_points)
             action = greedy.act(obs, mask_for(legal))
         assert action in legal, f"illegal action {action} for seat {seat}"
@@ -87,7 +86,6 @@ def test_falls_back_to_greedy_for_the_trump_call() -> None:
     assert engine.state.hands.phase is Phase.TRUMP_CALL
     seat = engine.current_seat()
     legal = engine.legal_actions(seat)
-
 
     obs = observation_for(engine.state.hands, seat, engine.state.game_points)
     assert policy.decide(engine) == GreedyPolicy().act(obs, mask_for(legal))
@@ -219,8 +217,8 @@ def test_elimination_keeps_contenders_that_are_not_ruled_out() -> None:
     )
     actions = [0, 1, 2]
     drawn = 10
-    totals = {0: 1.0, 1: 0.9, 2: 0.8}       # nearly tied
-    squares = {0: 10.0, 1: 10.0, 2: 10.0}   # high variance -> nothing resolvable
+    totals = {0: 1.0, 1: 0.9, 2: 0.8}  # nearly tied
+    squares = {0: 10.0, 1: 10.0, 2: 10.0}  # high variance -> nothing resolvable
     counts = dict.fromkeys(actions, drawn)
     kept = policy._survivors(actions, totals, squares, counts, baseline=0)
     assert set(kept) == set(actions), "a contender was eliminated on noise"
@@ -306,7 +304,10 @@ def test_parallel_scoring_plays_a_full_match_legally() -> None:
         seed=1,
         workers=3,
     )
-    assert len(play_match(policy, seed=41)) > 13
+    try:
+        assert len(play_match(policy, seed=41)) > 13
+    finally:
+        policy.close()
 
 
 def test_close_terminates_the_worker_pool() -> None:
@@ -324,21 +325,30 @@ def test_close_terminates_the_worker_pool() -> None:
         seed=2,
         workers=2,
     )
-    # Force pool creation without demanding the match run to completion --
-    # play_match() asserts termination, which one decision does not reach.
-    engine = HokmEngine()
-    engine.start_match(seed=5)
-    while engine.state.hands.phase is not Phase.CARD_PLAY:
-        engine.apply_action(engine.legal_actions()[0])
-    policy.decide(engine)
-    pool = policy._pool
+    # Exercise ownership/lifetime directly. Whether a particular seeded
+    # decision needs scoring depends on greedy and is not a pool invariant;
+    # parallel decision behavior is covered independently above.
+    pool = policy._scorer_pool()
     assert pool is not None, "the pool was never created by a workers>1 decision"
     policy.close()
     assert policy._pool is None
-    # A closed pool refuses new work; this is the multiprocessing contract
-    # close() is supposed to establish, not something this test invents.
+    # A closed owned pool refuses new work; an idempotent second close is safe.
     with pytest.raises(ValueError):
         pool.map(int, [1])
-    # Calling close() again (as a second eviction pass on the same object
-    # could) must not raise.
     policy.close()
+
+
+def test_close_leaves_an_externally_owned_shared_pool_usable() -> None:
+    shared = multiprocessing.get_context("fork").Pool(1)
+    try:
+        policy = NumpyHybridPolicy(
+            export_weights(RankCNN(channels=TEST_CHANNELS).eval()),
+            workers=2,
+            pool=shared,
+        )
+        policy.close()
+        assert policy._pool is shared
+        assert shared.map(int, [1, 2]) == [1, 2]
+    finally:
+        shared.close()
+        shared.join()

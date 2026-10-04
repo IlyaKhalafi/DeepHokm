@@ -20,6 +20,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from deephokm.policies.greedy_policy import GreedyPolicy
 from deephokm.rules.legality import NUM_ACTIONS
 from deephokm.webui.search_serving import (
     SearchServedPolicy,
@@ -101,8 +102,12 @@ def _get_search_pool(workers: int) -> multiprocessing.pool.Pool | None:
     return pool
 
 
-def get_served() -> SearchServedPolicy | ServedPolicy | None:
+def get_served() -> SearchServedPolicy | ServedPolicy | GreedyPolicy | None:
     """Load the served policy once per process (memoized, race-free).
+
+    ``DEEPHOKM_POLICY=greedy`` serves the deterministic public-information
+    heuristic directly, without loading network weights. Otherwise the numpy
+    action-value network with optional search remains the default.
 
     The numpy action-value network with search is preferred: it is the
     strongest measured policy here (0.841 against a greedy opposing team),
@@ -111,7 +116,13 @@ def get_served() -> SearchServedPolicy | ServedPolicy | None:
     deployment configured with DEEPHOKM_MODEL keeps working.
     """
     with _model_lock:
-        if not hasattr(app.state, "model") and not getattr(app.state, "model_disabled", False):
+        if (
+            not hasattr(app.state, "model")
+            and os.environ.get("DEEPHOKM_POLICY", "network").strip().lower() == "greedy"
+        ):
+            app.state.model = GreedyPolicy()
+            app.state.model_disabled = False
+        elif not hasattr(app.state, "model") and not getattr(app.state, "model_disabled", False):
             weights = resolve_weights_path()
             checkpoint = resolve_model_path()
             if os.path.isfile(weights):
@@ -120,7 +131,8 @@ def get_served() -> SearchServedPolicy | ServedPolicy | None:
                 # for, and concurrent games would overwrite one another.
                 app.state.weights = load_shared_weights(weights)
                 app.state.model = SearchServedPolicy(
-                    app.state.weights, search_k=resolve_search_k(),
+                    app.state.weights,
+                    search_k=resolve_search_k(),
                     workers=resolve_workers(),
                     pool=_get_search_pool(resolve_workers()),
                 )
@@ -131,7 +143,7 @@ def get_served() -> SearchServedPolicy | ServedPolicy | None:
         return getattr(app.state, "model", None)
 
 
-def _fresh_policy() -> SearchServedPolicy | ServedPolicy | None:
+def _fresh_policy() -> SearchServedPolicy | ServedPolicy | GreedyPolicy | None:
     """A policy instance for one game.
 
     The search policy is rebuilt per game so that each game owns the engine
@@ -142,10 +154,13 @@ def _fresh_policy() -> SearchServedPolicy | ServedPolicy | None:
     served = get_served()
     if isinstance(served, SearchServedPolicy):
         return SearchServedPolicy(
-            app.state.weights, search_k=resolve_search_k(),
+            app.state.weights,
+            search_k=resolve_search_k(),
             workers=resolve_workers(),
             pool=_get_search_pool(resolve_workers()),
         )
+    if isinstance(served, GreedyPolicy):
+        return GreedyPolicy()
     return served
 
 

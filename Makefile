@@ -11,6 +11,7 @@
 # any whitespace between a value and a trailing comment, which would otherwise
 # pad paths and URLs with trailing spaces.
 DEEPHOKM_PORT := $(strip $(DEEPHOKM_PORT))
+DEEPHOKM_POLICY := $(strip $(DEEPHOKM_POLICY))
 DEEPHOKM_MODEL := $(strip $(DEEPHOKM_MODEL))
 DEEPHOKM_MODEL_PATH := $(strip $(DEEPHOKM_MODEL_PATH))
 DEEPHOKM_GPU_DEVICE_ID := $(strip $(DEEPHOKM_GPU_DEVICE_ID))
@@ -21,6 +22,7 @@ DEEPHOKM_BASE_URL := $(strip $(DEEPHOKM_BASE_URL))
 DEEPHOKM_CUDA_COMPAT_PATH := $(strip $(DEEPHOKM_CUDA_COMPAT_PATH))
 
 export DEEPHOKM_PORT
+export DEEPHOKM_POLICY
 export DEEPHOKM_MODEL
 export DEEPHOKM_MODEL_PATH
 export DEEPHOKM_GPU_DEVICE_ID
@@ -42,7 +44,7 @@ endif
 
 ARGS ?=
 
-.PHONY: help test lint format bench train plot webui smoke visual-qa \
+.PHONY: help test lint format bench train train-qnet pretrain-bc plot webui smoke visual-qa \
         docker-build docker-up docker-down
 
 help:  ## Show available targets
@@ -65,6 +67,9 @@ bench:  ## Benchmark environment throughput
 
 train:  ## Run self-play training (extra flags via ARGS="...")
 	uv run python -m deephokm.training.train $(ARGS)
+
+train-qnet:  ## Distill legal search labels (see docs/TRAINING.md)
+	uv run python -m scripts.train_qnet $(ARGS)
 
 pretrain-bc:  ## Behavioral-cloning warm start against GreedyPolicy (extra flags via ARGS="...")
 	uv run python -m deephokm.training.behavioral_cloning $(ARGS)

@@ -22,7 +22,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ilya-g/deephokm"
+Homepage = "https://github.com/IlyaKhalafi/DeepHokm"
+Repository = "https://github.com/IlyaKhalafi/DeepHokm"
 
 [dependency-groups]
 dev = [
@@ -87,6 +88,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "--cov=deephokm --cov-report=term-missing --cov-branch --cov-fail-under=80 -q"
 filterwarnings = [
     "ignore::DeprecationWarning:gymnasium.*",

@@ -4,7 +4,9 @@ Running the web UI locally, in Docker, and the configuration surface.
 
 ![DeepHokm web UI](media/board.png)
 
-The served policy is the numpy action-value network. `DEEPHOKM_QNET` points
+The served policy is selected by `DEEPHOKM_POLICY`: `network` (the default)
+uses the numpy action-value network, while `greedy` runs the deterministic
+public-information heuristic without loading weights. `DEEPHOKM_QNET` points
 at the weight archive; `DEEPHOKM_SEARCH_K` (default `0`) sets how many
 determinized worlds each decision samples from a live search paired with
 the network, trading latency for strength -- `0` is the network alone (no
@@ -77,4 +79,3 @@ All deployment-specific values are environment variables documented in
 [`.env.example`](.env.example) — GPU device id, web UI port, served model
 paths, and the visual QA reviewer endpoint. Defaults live only there;
 per-machine values live in a gitignored `.env`.
-

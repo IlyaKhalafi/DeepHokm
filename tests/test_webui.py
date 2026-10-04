@@ -15,6 +15,7 @@ import deephokm.webui.app as app_module
 from deephokm.cards import NUM_CARDS
 from deephokm.env import HokmEnv
 from deephokm.nn.policy import HokmMaskablePolicy
+from deephokm.policies.greedy_policy import GreedyPolicy
 from deephokm.policies.random_policy import RandomPolicy
 from deephokm.rules.state import HAKEM_FIRST_BATCH, NUM_SEATS
 from deephokm.webui.app import app
@@ -88,6 +89,22 @@ def test_health(client: TestClient) -> None:
     body = response.json()
     assert body["status"] == "ok"
     assert body["model_loaded"] is True
+
+
+def test_greedy_policy_mode_skips_model_loading(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEEPHOKM_POLICY", "greedy")
+    if hasattr(app_module.app.state, "model"):
+        del app_module.app.state.model
+    app_module.app.state.model_disabled = False
+    try:
+        served = app_module.get_served()
+        assert isinstance(served, GreedyPolicy)
+        assert isinstance(app_module._fresh_policy(), GreedyPolicy)
+        assert app_module.health()["policy"] == "greedy-baseline"
+    finally:
+        if hasattr(app_module.app.state, "model"):
+            del app_module.app.state.model
+        app_module.app.state.model_disabled = False
 
 
 def test_index_serves_html(client: TestClient) -> None:

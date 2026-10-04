@@ -11,9 +11,9 @@ rollouts, an 18 ms decision -- which measures **66.3%** (80 held-out matches,
 deployment choice traded against latency, not a different model (see
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) to enable it).
 
-**No deep-learning framework at play time.** Inference is numpy; PyTorch
-trains the network and converts its weights, and is a development dependency
-only. Torch-free inference is enforced by a test that blocks the import and
+**No deep-learning framework in the default inference path.** Inference is
+NumPy; PyTorch trains the network and converts its weights. Torch-free
+inference is enforced by a test that blocks the import and
 plays a match anyway.
 
 ![DeepHokm web UI](docs/media/demo.gif)
@@ -21,7 +21,10 @@ plays a match anyway.
 ## Play it
 
 ```bash
+git clone https://github.com/IlyaKhalafi/DeepHokm.git
+cd DeepHokm
 uv sync
+cp .env.example .env
 make webui        # http://localhost:8025
 ```
 
@@ -30,7 +33,7 @@ the UI is the same one used for evaluation.
 
 ## How it works
 
-Each decision samples **determinized worlds** — full deals of the unseen cards
+When search is enabled, each decision samples **determinized worlds** — full deals of the unseen cards
 consistent with everything public: your hand, every card played, and the suit
 voids revealed when a player fails to follow suit. Every legal card is played
 out in each world, and a card beats the scripted baseline only by winning an
@@ -52,7 +55,7 @@ PyTorch — a test enforces it by blocking the import and playing a match.
 | Self-play reinforcement learning (MaskablePPO, transformer) | **abandoned** — plateaued at the level of a greedy clone across every variant |
 | Six network architectures, 377k to 8M parameters | **abandoned** — all landed in one band; a structure-free MLP matched the transformer |
 | Regression on raw search values, scored by teacher agreement | **replaced** — 60% of decisions have tied best actions, so the metric graded coin flips |
-| Distilling from a weak search | **replaced** — a student cannot exceed its teacher, and that one won only 73% |
+| Distilling from a weak search | **replaced** — better teacher labels were needed; that search won only 73% |
 | Pruning the search to the network's top choices | **replaced** — lost to plain search: an action never scored can never be chosen |
 | **Suit-equivariant CNN + soft targets on decisive decisions + elimination search** | **kept** — the design above |
 
@@ -74,10 +77,10 @@ the network-alone row.
 † measured during development on the seed sets used for tuning, so these are
 indicative rather than held-out.
 
-The network does not raise the ceiling: it reaches the search's own level and
-makes small-budget search substantially stronger. Why nothing in this family can
-exceed the search it wraps is derived in
-[the methods write-up](docs/METHODS_AND_RESULTS.md#19-why-the-hybrid-cannot-beat-the-search-it-wraps).
+These measurements use the bundled checkpoint and the greedy baseline from
+those experiments. Later policy versions require fresh comparisons. Search
+improves the measured network's play, but teacher agreement is not a universal
+bound on a student's strength; see [methods and limitations](docs/METHODS_AND_RESULTS.md).
 
 ## Documentation
 
@@ -99,3 +102,8 @@ make bench        # environment throughput
 ```
 
 Requires Python 3.10+ and [uv](https://github.com/astral-sh/uv).
+
+See [Contributing](docs/CONTRIBUTING.md) for development checks and repository hygiene.
+Code is MIT-licensed. Generated training data, run checkpoints, logs, and local
+experiments are not part of source releases; the bundled inference weights are
+included so the demo works after cloning.

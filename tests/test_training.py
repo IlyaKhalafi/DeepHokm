@@ -383,24 +383,23 @@ def test_hyperparameters_match_spec() -> None:
     assert hyperparameters(gamma=0.997)["gamma"] == 0.997
     assert hp["gae_lambda"] == 0.95
     assert hp["clip_range"] == 0.2
-    assert hp["ent_coef"] == 0.01
+    assert hp["ent_coef"] == 0.005
     assert hp["vf_coef"] == 0.5
     assert hp["max_grad_norm"] == 0.5
-    # Deviations from the reference set, each forced by evidence recorded in
-    # REVIEW_LOG.local.md.
-    assert hp["batch_size"] == 1024
-    assert hp["n_epochs"] == 4
+    assert hp["batch_size"] == 5120
+    assert hp["n_epochs"] == 2
     assert hp["target_kl"] == 0.02
     schedule = hp["learning_rate"]
     assert callable(schedule)
-    # progress_remaining runs 1 -> 0 across training; the floor is 3e-5, not 0.
-    assert schedule(1.0) == 3e-4
-    assert schedule(0.0) == pytest.approx(3e-5)
+    # progress_remaining runs 1 -> 0 across training; the floor is nonzero.
+    assert schedule(1.0) == 1e-3
+    assert schedule(0.0) == pytest.approx(1e-5)
 
 
 def test_hyperparameters_for_config_is_json_safe() -> None:
     dumped = json.dumps(hyperparameters_for_config())
-    assert "linear" in dumped
+    assert json.loads(dumped)["learning_rate"] == "linear 1e-3 -> 1e-5"
+    assert hyperparameters_for_config(n_steps=64)["n_steps"] == 64
 
 
 def test_gauntlet_opponents_cover_the_specified_rungs() -> None:

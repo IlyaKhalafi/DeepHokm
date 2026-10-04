@@ -29,6 +29,7 @@ import numpy as np
 
 from deephokm.cards import NUM_CARDS, NUM_RANKS, NUM_SUITS
 from deephokm.env.spaces import Observation
+from deephokm.nn.public_features import append_void_planes
 from deephokm.rules.state import TRICKS_PER_HAND
 
 NUM_PLANES = 14
@@ -46,7 +47,7 @@ PLANE_LEGAL = 13
 
 
 def build_features(
-    observation: Observation, action_mask: np.ndarray
+    observation: Observation, action_mask: np.ndarray, *, feature_mode: str = "baseline"
 ) -> tuple[np.ndarray, np.ndarray]:
     """Render one observation as ``(planes, scalars)``.
 
@@ -97,7 +98,7 @@ def build_features(
             np.asarray(observation["seat"], dtype=np.float32),
         ]
     ).astype(np.float32)
-    return planes, scalars
+    return append_void_planes(planes, observation, feature_mode), scalars
 
 
 __all__ = ["NUM_PLANES", "NUM_SCALARS", "build_features"]

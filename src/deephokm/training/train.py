@@ -64,8 +64,8 @@ DEFAULT_N_STEPS = 256
 # pays the same for a trick that decided a close hand as for one that mops
 # up an already-settled one, so it can teach the policy to chase tricks that
 # no longer matter. hand_reward is the coarser, better-aligned signal — it
-# only pays out at the point a hand's outcome is actually decided — so it
-# replaces trick-level shaping as the default and trick_reward defaults to 0.
+# only pays out at the point a hand's outcome is actually decided. Both
+# shaping terms are configurable and are disabled for evaluation.
 DEFAULT_TRICK_REWARD = 0.10
 DEFAULT_HAND_REWARD = 0.30
 DEFAULT_GAMMA = 0.997
@@ -99,26 +99,10 @@ def hyperparameters(n_steps: int = DEFAULT_N_STEPS, gamma: float = DEFAULT_GAMMA
     ``gamma`` and ``gae_lambda`` are back at the reference values (see the
     comment on :data:`DEFAULT_GAMMA` for why the earlier gamma=0.95 deviation
     was reverted). The remaining deviations from the reference set are each
-    forced by evidence recorded in ``REVIEW_LOG.local.md``:
-
-    - ``n_epochs`` is cut from 10 to 4 and ``batch_size`` raised from 512 to
-      1024: the first full run climbed to about 68% against random play and
-      then collapsed back to chance while ``approx_kl`` grew past 0.4 — ten
-      epochs of gradient steps over the same 2048-sample rollout, at a fixed
-      3e-4 learning rate over a 56-action masked space, walks the policy far
-      outside the trust region every update. Fewer, larger-batch epochs
-      directly reduces how far a single update can move the policy, rather
-      than only capping the damage after the fact.
-    - ``target_kl`` remains as a safety net on top of that, tightened from
-      0.03 to 0.02 nats per update.
-    - ``learning_rate`` decays linearly to a floor of 3e-5 (not to zero): a
-      schedule that reaches exactly zero stops learning for the last portion
-      of the run, which just wastes that step budget.
-    - ``ent_coef`` stays fixed at 0.01: unlike ``learning_rate``, ``ent_coef``
-      is consumed as a plain float inside PPO's loss (see
-      ``OnPolicyAlgorithm``), not run through a schedule, so annealing it
-      would require patching the training loop rather than passing a
-      callable — out of scope here without a demonstrated need.
+    motivated by observed training instability. The current experimental
+    defaults use two epochs, a 5120-sample minibatch, a 0.02 target-KL
+    safety limit, and a fixed 0.005 entropy coefficient. The learning rate
+    decays linearly from 1e-3 to a nonzero 1e-5 floor.
 
     ``n_steps`` is unchanged from the vec-env scaling rationale in
     :data:`DEFAULT_N_STEPS`.
@@ -129,7 +113,7 @@ def hyperparameters(n_steps: int = DEFAULT_N_STEPS, gamma: float = DEFAULT_GAMMA
     """
     return {
         "learning_rate": LinearSchedule(1e-3, 1e-5, 1.0),
-        "n_steps": 256,
+        "n_steps": n_steps,
         "batch_size": 5120,
         "n_epochs": 2,
         "gamma": gamma,
@@ -147,7 +131,7 @@ def hyperparameters_for_config(
 ) -> dict[str, Any]:
     """Return the hyperparameters in a JSON-serializable form."""
     values = dict(hyperparameters(n_steps, gamma))
-    values["learning_rate"] = "linear 3e-4 -> 3e-5"
+    values["learning_rate"] = "linear 1e-3 -> 1e-5"
     return values
 
 

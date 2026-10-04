@@ -34,6 +34,7 @@ import numpy as np
 
 from deephokm.cards import NUM_CARDS
 from deephokm.env.spaces import Observation, mask_for, observation_for
+from deephokm.nn.feature_contract import resolve_feature_mode
 from deephokm.nn.features import build_features
 from deephokm.nn.numpy_qnet import NumpyQNet, load_weights
 from deephokm.policies.greedy_policy import GreedyPolicy
@@ -145,6 +146,7 @@ class NumpyHybridPolicy:
         eliminate: bool = False,
         temperature: float = DEFAULT_TEMPERATURE,
         pool: multiprocessing.pool.Pool | None = None,
+        feature_mode: str | None = None,
     ) -> None:
         """Create the policy.
 
@@ -176,6 +178,7 @@ class NumpyHybridPolicy:
         """
         params = load_weights(weights) if isinstance(weights, Path) else weights
         self.net = NumpyQNet(params)
+        self.feature_mode = resolve_feature_mode(weights, self.net.input_planes, feature_mode)
         self.verify_samples = verify_samples
         self.top_m = top_m
         self.max_p_value = max_p_value
@@ -289,7 +292,7 @@ class NumpyHybridPolicy:
         baseline: int,
     ) -> int:
         """Score every legal action, with the network deciding sample counts."""
-        planes, scalars = build_features(observation, mask)
+        planes, scalars = build_features(observation, mask, feature_mode=self.feature_mode)
         values = self.net(planes[None], scalars[None])[0]
         budget = self._budget(values, legal, self.verify_samples * len(legal))
 
@@ -326,7 +329,7 @@ class NumpyHybridPolicy:
         baseline: int,
     ) -> list[int]:
         """The network's ``top_m`` legal actions, best first, minus greedy's."""
-        planes, scalars = build_features(observation, mask)
+        planes, scalars = build_features(observation, mask, feature_mode=self.feature_mode)
         values = self.net(planes[None], scalars[None])[0]
         ranked = [int(legal[i]) for i in np.argsort(values[legal])[::-1]]
         return [a for a in ranked[: self.top_m] if a != baseline]
@@ -414,7 +417,7 @@ class NumpyHybridPolicy:
         beats it on the same sign test the pure search uses, so the accept gate
         is unchanged.
         """
-        planes, scalars = build_features(observation, mask)
+        planes, scalars = build_features(observation, mask, feature_mode=self.feature_mode)
         values = self.net(planes[None], scalars[None])[0]
         survivors = sorted(legal, key=lambda a: -values[a])
         if baseline not in survivors:  # defensive: greedy must stay in the field

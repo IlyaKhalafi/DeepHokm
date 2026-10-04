@@ -1,66 +1,118 @@
-"""Architecture sweep for the Q-network on K=192 search labels.
+"""Dataset features and model builders for search-value distillation.
 
-Every arm consumes the SAME precomputed features, the same train/val split,
-the same seed, optimizer, epoch count and batch size; only the network body
-differs. Arms are selected by argv[1].
-
-Features (built once, cached):
-  planes  (N, 14, 4, 13) float32 -- suit x rank grid:
-      0 own hand, 1 seen, 2 on table,
-      3 trump suit (broadcast over ranks),
-      4 history recency (1.0 = most recent play, decaying, 0 = not played),
-      5-8 history role one-hot (who played it: self/next/partner/prev),
-      9-12 current-trick role one-hot (who played it),
-      13 legality (this card is a legal action right now)
-  scalars (N, 10) float32 -- phase(2), tricks_won(2)/13, points(2)/7, seat(4)
-
-The suit axis is exchangeable and the rank axis is ordered, so conv arms
-convolve along ranks only and pool over suits; see the CNN docstrings.
+Match-level validation membership stays fixed as new shards arrive. Public
+feature channels share their implementation with the NumPy serving policies.
+Only load trusted, locally generated pickle shards.
 """
+
 import glob
+import hashlib
 import os
 import pickle
-import sys
+from pathlib import Path
 
 import numpy as np
 import torch as th
 from torch import nn
 
-sys.path.insert(0, "/home/ubuntu8/ilya/research/DeepHokm/src")
+from deephokm.nn import public_features as _public_features
 
 NUM_SUITS, NUM_RANKS, NUM_CARDS, NUM_ACTIONS = 4, 13, 52, 56
-ROOT = "/home/ubuntu8/ilya/research/DeepHokm/scratch"
+NUM_SEATS, BASE_PLANES = 4, 14
+PARTNER_ROLE = 2
+ROOT = str(Path.cwd() / "data")
 DEFAULT_GLOB = "qdata_*.pkl"
-# Features are cached per dataset: a single cache path silently served the old
-# K=192 features to a run that asked for K=3072 labels.
+FEATURE_SCHEMA_VERSION = 4
+PUBLIC_FEATURE_SOURCE = _public_features.__file__
+FEATURE_MODES = _public_features.FEATURE_MODES
+public_voids = _public_features.public_voids
+current_trick = _public_features.current_trick
+trick_context_planes = _public_features.trick_context_planes
+append_void_planes = _public_features.append_void_planes
+CONTEXT_NAMES = _public_features.CONTEXT_NAMES
+MIN_DATA_SHARDS = 2
+
+
+# Features are cached per dataset pattern and validated against the matched
+# source files. A long-running generator adds shards over time, so the pattern
+# alone is not enough to identify the contents of a partial dataset.
 def cache_path(pattern: str) -> str:
-    slug = pattern.replace("*", "x").replace(".pkl", "").replace(",", "_")
+    slug = hashlib.sha256(pattern.encode()).hexdigest()[:16]
     return f"{ROOT}/features_{slug}.npz"
 
 
-def build_features(pattern: str = DEFAULT_GLOB):
-    """Build features from every shard matching ``pattern`` (comma-separated ok)."""
+def matching_files(pattern: str) -> list[str]:
+    """Resolve shard patterns in stable match-index order."""
     files: list[str] = []
     for part in pattern.split(","):
-        files.extend(sorted(
-            glob.glob(f"{ROOT}/{part.strip()}"),
-            key=lambda p: int(p.split("_")[-1].split(".")[0]),
-        ))
+        files.extend(
+            sorted(
+                glob.glob(f"{ROOT}/{part.strip()}"),
+                key=lambda p: int(p.split("_")[-1].split(".")[0]),
+            )
+        )
     if not files:
         raise FileNotFoundError(f"no shards matched {pattern!r} under {ROOT}")
+    return list(dict.fromkeys(os.path.realpath(path) for path in files))
+
+
+def source_signature(files: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Identify the exact completed shards used by a feature cache."""
+    stats = [os.stat(path) for path in files]
+    return (
+        np.asarray(files),
+        np.asarray([stat.st_size for stat in stats], dtype=np.int64),
+        np.asarray([stat.st_mtime_ns for stat in stats], dtype=np.int64),
+    )
+
+
+def load_split_shards(files: list[str]):
+    """Load disjoint matches and keep validation membership stable."""
+    if len(files) < MIN_DATA_SHARDS:
+        raise ValueError("at least two completed shards are required for training and validation")
     data = []
+    seeds: set[int] = set()
     for f in files:
         with open(f, "rb") as fh:
-            data.append(pickle.load(fh))
+            shard = pickle.load(fh)
+        if "seed" in shard:
+            if shard["seed"] in seeds:
+                raise ValueError(f"duplicate match seed {shard['seed']} in {f}")
+            seeds.add(shard["seed"])
+        data.append(shard)
+    # Membership stays fixed while a collector adds files. A validation
+    # match must never later become training data because a glob grew.
+    train, validation = [], []
+    for path, shard in zip(files, data, strict=True):
+        key = f"seed:{shard['seed']}" if "seed" in shard else f"shard:{Path(path).name}"
+        is_validation = hashlib.sha256(key.encode()).digest()[0] % 4 == 0
+        (validation if is_validation else train).append(shard)
+    if not train or not validation:
+        raise ValueError("need completed shards in both stable train and validation partitions")
+    data = train + validation
+    return data, sum(len(d["qvals"]) for d in train)
+
+
+def feature_source_hash():
+    """Cache identity includes the pinned, shared public-feature implementation."""
+    return hashlib.sha256(
+        Path(__file__).read_bytes() + Path(PUBLIC_FEATURE_SOURCE).read_bytes()
+    ).hexdigest()
+
+
+def build_features(
+    pattern: str = DEFAULT_GLOB, *, files: list[str] | None = None, feature_mode: str = "baseline"
+):
+    """Build features from every shard matching ``pattern`` (comma-separated ok)."""
+    if feature_mode not in FEATURE_MODES:
+        raise ValueError(f"unknown feature mode: {feature_mode}")
+    files = matching_files(pattern) if files is None else files
+    data, n_train = load_split_shards(files)
     obs = {k: np.concatenate([d["obs"][k] for d in data]) for k in data[0]["obs"]}
     masks = np.concatenate([d["masks"] for d in data]).astype(np.float32)
     qvals = [q for d in data for q in d["qvals"]]
     legals = [lg for d in data for lg in d["legals"]]
     n = len(qvals)
-    # Hold out the last quarter of shards. Shards are disjoint match sets, so
-    # this keeps every decision from one deal on the same side of the split.
-    n_hold = max(1, len(data) // 4)
-    n_train = sum(len(d["qvals"]) for d in data[: len(data) - n_hold])
 
     planes = np.zeros((n, 14, NUM_SUITS, NUM_RANKS), dtype=np.float32)
     for i, key in enumerate(("hand", "seen", "trick")):
@@ -103,25 +155,66 @@ def build_features(pattern: str = DEFAULT_GLOB):
     targets = np.zeros((n, NUM_ACTIONS), dtype=np.float32)
     for i, (lg, q) in enumerate(zip(legals, qvals, strict=True)):
         targets[i, lg] = q
+    if feature_mode != "baseline":
+        planes = np.stack(
+            [
+                append_void_planes(
+                    planes[i], {key: value[i] for key, value in obs.items()}, feature_mode
+                )
+                for i in range(n)
+            ]
+        )
     return planes, scalars, masks, targets, n_train
 
 
-def load_features(pattern: str = DEFAULT_GLOB):
-    """Cached features for ``pattern``; the cache is keyed by the pattern."""
+def load_features(pattern: str = DEFAULT_GLOB, *, feature_mode: str = "baseline"):
+    """Load a cache only while its source shard set is unchanged."""
+    if feature_mode not in FEATURE_MODES:
+        raise ValueError(f"unknown feature mode: {feature_mode}")
     cache = cache_path(pattern)
+    if feature_mode != "baseline":
+        cache = cache.removesuffix(".npz") + f"_{feature_mode}.npz"
+    files = matching_files(pattern)
+    signature = source_signature(files)
+    source_hash = feature_source_hash()
     if os.path.exists(cache):
-        z = np.load(cache)
-        return z["planes"], z["scalars"], z["masks"], z["targets"], int(z["n_train"])
-    planes, scalars, masks, targets, n_train = build_features(pattern)
-    np.savez_compressed(
-        cache, planes=planes, scalars=scalars, masks=masks, targets=targets,
-        n_train=n_train,
+        with np.load(cache) as z:
+            if (
+                "schema_version" in z
+                and int(z["schema_version"]) == FEATURE_SCHEMA_VERSION
+                and "feature_source_sha256" in z
+                and str(z["feature_source_sha256"]) == source_hash
+                and all(
+                    key in z and np.array_equal(z[key], value)
+                    for key, value in zip(("files", "sizes", "mtimes_ns"), signature, strict=True)
+                )
+            ):
+                return z["planes"], z["scalars"], z["masks"], z["targets"], int(z["n_train"])
+    feature_options = {"feature_mode": feature_mode} if feature_mode != "baseline" else {}
+    planes, scalars, masks, targets, n_train = build_features(
+        pattern, files=files, **feature_options
     )
+    temporary = f"{cache}.{os.getpid()}.tmp"
+    with open(temporary, "wb") as stream:
+        np.savez_compressed(
+            stream,
+            planes=planes,
+            scalars=scalars,
+            masks=masks,
+            targets=targets,
+            n_train=n_train,
+            files=signature[0],
+            sizes=signature[1],
+            mtimes_ns=signature[2],
+            schema_version=FEATURE_SCHEMA_VERSION,
+            feature_source_sha256=source_hash,
+        )
+    os.replace(temporary, cache)
     return planes, scalars, masks, targets, n_train
 
 
 def build_row_features(
-    obs: dict, mask: np.ndarray
+    obs: dict, mask: np.ndarray, *, feature_mode: str = "baseline"
 ) -> tuple[np.ndarray, np.ndarray]:
     """Features for ONE live observation, identical to the batch builder.
 
@@ -164,7 +257,7 @@ def build_row_features(
             np.asarray(obs["seat"], dtype=np.float32),
         ]
     ).astype(np.float32)
-    return planes, scalars
+    return append_void_planes(planes, obs, feature_mode), scalars
 
 
 class MLP(nn.Module):
@@ -201,10 +294,10 @@ class RankCNN(nn.Module):
     value; a pooled (permutation-invariant) vector feeds the trump actions.
     """
 
-    def __init__(self, ch: int = 128, layers: int = 4) -> None:
+    def __init__(self, ch: int = 128, layers: int = 4, input_planes: int = 14) -> None:
         super().__init__()
         self.blocks = nn.ModuleList()
-        cin = 14
+        cin = input_planes
         for _ in range(layers):
             self.blocks.append(nn.Conv2d(cin * 2, ch, (1, 3), padding=(0, 1)))
             cin = ch
@@ -217,10 +310,10 @@ class RankCNN(nn.Module):
     def forward(self, planes: th.Tensor, scalars: th.Tensor) -> th.Tensor:
         h = planes
         for block in self.blocks:
-            ctx = h.mean(dim=2, keepdim=True).expand_as(h)   # symmetric over suits
+            ctx = h.mean(dim=2, keepdim=True).expand_as(h)  # symmetric over suits
             h = th.nn.functional.gelu(block(th.cat([h, ctx], dim=1)))
         h = h + self.scalar_proj(scalars).view(h.shape[0], -1, 1, 1)
-        card_logits = self.card_head(h).flatten(1)           # (N, 52)
+        card_logits = self.card_head(h).flatten(1)  # (N, 52)
         pooled = th.cat([h.mean(dim=(2, 3)), h.amax(dim=(2, 3))], dim=1)
         trump_logits = self.trump_head(th.cat([pooled, scalars], dim=1))
         return th.cat([card_logits, trump_logits], dim=1)
@@ -267,9 +360,7 @@ class DeepSets(nn.Module):
     def __init__(self, d: int = 256) -> None:
         super().__init__()
         self.rank_emb = nn.Embedding(NUM_RANKS, 32)
-        self.enc = nn.Sequential(
-            nn.Linear(14 + 32, d), nn.GELU(), nn.Linear(d, d), nn.GELU()
-        )
+        self.enc = nn.Sequential(nn.Linear(14 + 32, d), nn.GELU(), nn.Linear(d, d), nn.GELU())
         self.suit_mix = nn.Sequential(nn.Linear(2 * d, d), nn.GELU())
         self.ctx = nn.Sequential(nn.Linear(2 * d + 10, d), nn.GELU())
         self.dec = nn.Sequential(nn.Linear(3 * d, d), nn.GELU(), nn.Linear(d, 1))
@@ -277,14 +368,14 @@ class DeepSets(nn.Module):
 
     def forward(self, planes: th.Tensor, scalars: th.Tensor) -> th.Tensor:
         n = planes.shape[0]
-        feats = planes.permute(0, 2, 3, 1)                              # (N,4,13,14)
+        feats = planes.permute(0, 2, 3, 1)  # (N,4,13,14)
         ranks = th.arange(NUM_RANKS, device=planes.device)
         rk = self.rank_emb(ranks).view(1, 1, NUM_RANKS, -1).expand(n, NUM_SUITS, -1, -1)
-        h = self.enc(th.cat([feats, rk], dim=-1))                       # (N,4,13,d)
+        h = self.enc(th.cat([feats, rk], dim=-1))  # (N,4,13,d)
 
         suit_desc = self.suit_mix(th.cat([h.mean(dim=2), h.amax(dim=2)], dim=-1))  # (N,4,d)
         global_desc = th.cat([suit_desc.mean(dim=1), suit_desc.amax(dim=1)], dim=-1)
-        ctx = self.ctx(th.cat([global_desc, scalars], dim=1))           # (N,d)
+        ctx = self.ctx(th.cat([global_desc, scalars], dim=1))  # (N,d)
 
         per_card = th.cat(
             [
@@ -293,88 +384,29 @@ class DeepSets(nn.Module):
                 ctx.view(n, 1, 1, -1).expand(-1, NUM_SUITS, NUM_RANKS, -1),
             ],
             dim=-1,
-        )                                                               # (N,4,13,3d)
-        card_logits = self.dec(per_card).squeeze(-1)                    # (N,4,13)
+        )  # (N,4,13,3d)
+        card_logits = self.dec(per_card).squeeze(-1)  # (N,4,13)
         return th.cat([card_logits.flatten(1), self.trump_head(ctx)], dim=1)
 
 
 ARMS = {"mlp": MLP, "rank_cnn": RankCNN, "grid_cnn": GridCNN, "deepsets": DeepSets}
 
 DEFAULT_EPOCHS = 20
-ARG_EPOCHS = 1   # argv index past which an explicit epoch count was given
-ARG_SCALE = 2    # ... and a capacity scale
+ARG_EPOCHS = 1  # argv index past which an explicit epoch count was given
+ARG_SCALE = 2  # ... and a capacity scale
+ARG_DATA = 3  # ... and an explicit dataset glob
 
 
-def _build(arm: str, model_cls: type, scale: float) -> nn.Module:
+def _build(arm: str, model_cls: type, scale: float, *, input_planes: int = 14) -> nn.Module:
     """Instantiate an arm at a capacity scale (1.0 = the sweep's baseline)."""
+    if input_planes != BASE_PLANES:
+        if arm != "rank_cnn":
+            raise ValueError("extra feature planes require rank_cnn")
+        return model_cls(
+            ch=int(128 * scale), layers=4 if scale <= 1 else 8, input_planes=input_planes
+        )
     if arm == "mlp":
         return model_cls(width=int(1024 * scale), depth=3 if scale <= 1 else 5)
     if arm in ("rank_cnn", "grid_cnn"):
         return model_cls(ch=int(128 * scale), layers=4 if scale <= 1 else 8)
     return model_cls(d=int(256 * scale))
-
-
-def main():
-    argv = sys.argv[1:]
-    arm = argv[0]
-    epochs = int(argv[1]) if len(argv) > ARG_EPOCHS else DEFAULT_EPOCHS
-    scale = float(argv[2]) if len(argv) > ARG_SCALE else 1.0
-    model_cls = ARMS[arm]
-    planes, scalars, masks, targets, n_train = load_features()
-    n = planes.shape[0]
-    print(f"arm={arm} n={n} train={n_train} val={n - n_train}", flush=True)
-
-    device = "cuda" if th.cuda.is_available() else "cpu"
-    th.manual_seed(0)
-    model = _build(arm, model_cls, scale).to(device)
-    n_par = sum(p.numel() for p in model.parameters())
-    print(f"params={n_par:,}", flush=True)
-    opt = th.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.01)
-
-    P = th.as_tensor(planes)
-    S = th.as_tensor(scalars)
-    M = th.as_tensor(masks)
-    T = th.as_tensor(targets)
-
-    rng = np.random.default_rng(0)
-    BATCH = 512
-    EPOCHS = epochs
-    for ep in range(EPOCHS):
-        model.train()
-        order = rng.permutation(n_train)
-        losses = []
-        for s in range(0, n_train, BATCH):
-            idx = th.as_tensor(order[s : s + BATCH])
-            p, sc, m, t = (x[idx].to(device) for x in (P, S, M, T))
-            pred = model(p, sc)
-            loss = (((pred - t) * m) ** 2).sum() / m.sum()
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-            losses.append(loss.item())
-        model.eval()
-
-        def acc_over(lo: int, hi: int) -> float:
-            good = seen = 0
-            with th.no_grad():
-                for st_ in range(lo, hi, BATCH):
-                    ix = th.arange(st_, min(st_ + BATCH, hi))
-                    p_, sc_, m_, t_ = (x[ix].to(device) for x in (P, S, M, T))
-                    pr = model(p_, sc_).masked_fill(m_ == 0, -1e9)
-                    tg = t_.masked_fill(m_ == 0, -1e9)
-                    good += (pr.argmax(1) == tg.argmax(1)).sum().item()
-                    seen += len(ix)
-            return good / seen
-
-        val_acc = acc_over(n_train, n)
-        # Same number of rows as val, from train: a like-for-like bias read.
-        train_acc = acc_over(0, min(n - n_train, n_train))
-        print(
-            f"epoch {ep + 1}: train_mse={np.mean(losses):.4f}, "
-            f"train_argmax_acc={train_acc:.4f}, val_argmax_acc={val_acc:.4f}",
-            flush=True,
-        )
-
-
-if __name__ == "__main__":
-    main()

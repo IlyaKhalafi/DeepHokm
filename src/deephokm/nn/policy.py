@@ -18,7 +18,7 @@ the value loss's gradients (``vf_coef=0.5`` by default) flow into the exact
 transformer weights the BC phase carefully tuned to imitate the target
 policy, before the critic has any accurate signal to contribute -- a
 plausible mechanism for the plateau this project's fine-tuning attempts hit
-repeatedly (see REVIEW_LOG.local.md). A dedicated critic extractor lets the
+repeatedly (see docs/RESULTS_TABLES.md). A dedicated critic extractor lets the
 value head catch up without perturbing the actor's starting representation.
 """
 

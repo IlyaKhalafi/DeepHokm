@@ -22,6 +22,7 @@ from deephokm.rules.legality import NUM_ACTIONS
 _ERF = np.vectorize(math.erf, otypes=[np.float32])
 _SQRT2 = math.sqrt(2.0)
 _KERNEL_WIDTH = 3
+GRID_INPUT_DIMENSIONS = 4
 
 
 def gelu(x: np.ndarray) -> np.ndarray:
@@ -91,6 +92,10 @@ class NumpyQNet:
         )
         if self._n_blocks == 0:
             raise ValueError("weights contain no 'blocks.*' convolutions; not a RankCNN checkpoint")
+        first_channels = params["blocks.0.weight"].shape[1]
+        if first_channels % 2:
+            raise ValueError("first convolution requires paired card/context channels")
+        self.input_planes = first_channels // 2
 
     def __call__(self, planes: np.ndarray, scalars: np.ndarray) -> np.ndarray:
         """Return action values.
@@ -104,6 +109,12 @@ class NumpyQNet:
             per-card, the last four are trump declarations.
         """
         h = np.ascontiguousarray(planes, dtype=np.float32)
+        if h.ndim != GRID_INPUT_DIMENSIONS or h.shape[1:] != (
+            self.input_planes,
+            NUM_SUITS,
+            NUM_RANKS,
+        ):
+            raise ValueError(f"network expects {self.input_planes} input planes on a 4x13 grid")
         for i in range(self._n_blocks):
             context = np.broadcast_to(h.mean(axis=2, keepdims=True), h.shape)
             h = gelu(

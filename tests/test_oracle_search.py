@@ -7,10 +7,11 @@ import copy
 import pytest
 
 from deephokm.env.spaces import mask_for, observation_for
+from deephokm.policies import oracle_search
 from deephokm.policies.greedy_policy import GreedyPolicy
 from deephokm.policies.oracle_search import oracle_best_action, oracle_ceiling
 from deephokm.rules.engine import HokmEngine
-from deephokm.rules.state import Phase, team_of
+from deephokm.rules.state import HandState, Phase, team_of
 
 
 def _play_to_card_play(engine: HokmEngine, seed: int) -> None:
@@ -173,57 +174,83 @@ def test_oracle_ceiling_is_deterministic() -> None:
 # monotonicity, never-mutates); an adversarial review found none of them
 # would actually fail if the controlled-team branching were disabled
 # entirely (every depth silently collapsing to the depth-0 rollout still
-# satisfies "non-decreasing"). These three use concrete, mined real-game
-# fixtures to prove the search actually does what it claims: the ROOT
+# satisfies "non-decreasing"). These three use fixed, explicit fixtures
+# to prove the search actually does what it claims: the ROOT
 # seat's own branching finds a strictly better line, the PARTNER seat's
 # branching does too (not just the root's), and a forced single-legal-
-# action decision truly consumes none of the depth budget.
+# action decision truly consumes none of the depth budget. Fixed synthetic
+# hands and a deterministic rollout isolate these mechanics from changing
+# production heuristic strength.
 
 
-def test_oracle_ceiling_root_branching_finds_a_strictly_better_line() -> None:
-    """Seed 14, ply 0: root seat 0's own choice, depth=1 beats depth=0."""
+class _BranchFixturePolicy(GreedyPolicy):
+    """Fixed public-input rollout so branching tests survive heuristic changes."""
+
+    def play_from_state(self, trump, current_trick, seat, legal, **public):
+        return min(legal) if seat % 2 == 0 else max(legal)
+
+
+def _branch_fixture(leader: int = 0) -> HokmEngine:
+    """Low club lead loses to a ruff; drawing trump first wins both tricks."""
     engine = HokmEngine()
-    _advance_n_greedy_plies(engine, seed=14, n_plies=0)
-    seat = engine.current_seat()
-    assert seat == 0
-    assert len(engine.legal_actions(seat)) > 1
-    team = team_of(seat)
+    relative = [[12, 51], [13, 39], [26, 27], [0, 1]]
+    hands = [relative[(seat - leader) % 4] for seat in range(4)]
+    engine.state.hands = HandState(
+        hands=hands,
+        hakem=leader,
+        leader=leader,
+        trump=3,
+        tricks_won=[5, 6],
+        phase=Phase.CARD_PLAY,
+    )
+    return engine
 
-    depth_zero = oracle_ceiling(engine, team, depth=0)
-    depth_one = oracle_ceiling(engine, team, depth=1)
+
+def test_oracle_ceiling_root_branching_finds_a_strictly_better_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root seat 0's own branching changes a loss into a win."""
+    monkeypatch.setattr(oracle_search, "GreedyPolicy", _BranchFixturePolicy)
+    engine = _branch_fixture()
+    assert engine.current_seat() == 0
+    depth_zero = oracle_ceiling(engine, 0, depth=0)
+    depth_one = oracle_ceiling(engine, 0, depth=1)
 
     assert depth_zero == -1.0
     assert depth_one == 1.0
 
 
-def test_oracle_ceiling_partner_branching_finds_a_strictly_better_line() -> None:
-    """Seed 14, ply 14: seat 2 (seat 0's partner) is acting, depth=1 beats
-    depth=0 -- proving the search genuinely branches over the PARTNER's
-    own decisions too, not only the root seat that initiated the search.
-    """
-    engine = HokmEngine()
-    _advance_n_greedy_plies(engine, seed=14, n_plies=14)
-    seat = engine.current_seat()
-    assert seat == 2
-    assert len(engine.legal_actions(seat)) > 1
-    team = team_of(seat)
-
-    depth_zero = oracle_ceiling(engine, team, depth=0)
-    depth_one = oracle_ceiling(engine, team, depth=1)
+def test_oracle_ceiling_partner_branching_finds_a_strictly_better_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Seat 2 (seat 0's partner), not only seat 0, receives branch budget."""
+    monkeypatch.setattr(oracle_search, "GreedyPolicy", _BranchFixturePolicy)
+    engine = _branch_fixture(leader=2)
+    assert engine.current_seat() == 2
+    depth_zero = oracle_ceiling(engine, 0, depth=0)
+    depth_one = oracle_ceiling(engine, 0, depth=1)
 
     assert depth_zero == -1.0
     assert depth_one == 1.0
 
 
-def test_oracle_ceiling_forced_action_does_not_consume_depth_budget() -> None:
-    """Seed 0, ply 13: the acting seat has only one legal action. depth=1
-    measured HERE must equal depth=1 measured at the very next real
-    decision, right after that forced action is applied -- proving the
-    forced move consumed none of the depth budget (a real, later decision
-    still has the full budget available, not one less).
-    """
+def test_oracle_ceiling_forced_action_does_not_consume_depth_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forced root follow leaves depth=1 for the partner's winning overruff."""
+    monkeypatch.setattr(oracle_search, "GreedyPolicy", _BranchFixturePolicy)
     engine = HokmEngine()
-    _advance_n_greedy_plies(engine, seed=0, n_plies=13)
+    engine.state.hands = HandState(
+        hands=[[0, 27], [13, 39], [12, 51], [1]],
+        hakem=3,
+        leader=3,
+        trump=3,
+        current_trick=[(3, 26)],
+        played=[26],
+        played_by=[3],
+        tricks_won=[5, 6],
+        phase=Phase.CARD_PLAY,
+    )
     seat = engine.current_seat()
     legal = engine.legal_actions(seat)
     assert len(legal) == 1
@@ -232,14 +259,13 @@ def test_oracle_ceiling_forced_action_does_not_consume_depth_budget() -> None:
     before = oracle_ceiling(engine, team, depth=1)
 
     after_engine = copy.deepcopy(engine)
-    obs = observation_for(after_engine.state.hands, seat, after_engine.state.game_points)
-    action = GreedyPolicy().act(obs, mask_for(legal))
-    outcome = after_engine.apply_action(action, seat=seat)
+    outcome = after_engine.apply_action(legal[0], seat=seat)
     assert not outcome.hand_complete
     assert after_engine.state.hands.phase is Phase.CARD_PLAY
 
     after = oracle_ceiling(after_engine, team, depth=1)
 
+    assert oracle_ceiling(engine, team, depth=0) == -1.0
     assert before == after == 1.0
 
 

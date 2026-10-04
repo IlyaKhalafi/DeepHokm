@@ -307,9 +307,7 @@ def sample_determinized_hands(
                     hand.extend(cards_by_suit[suit][start : start + count])
                     cursor[suit] += count
             assignment[seat] = hand
-    return [
-        list(root_hand) if seat == root_seat else assignment[seat] for seat in range(NUM_SEATS)
-    ]
+    return [list(root_hand) if seat == root_seat else assignment[seat] for seat in range(NUM_SEATS)]
 
 
 def _clone_for_simulation(
@@ -351,6 +349,7 @@ def _clone_for_simulation(
         current_trick=list(hands.current_trick),
         played=list(hands.played),
         played_by=list(hands.played_by),
+        void_suits=[set(suits) for suits in hands.void_suits],
         tricks_won=list(hands.tricks_won),
         trick_winners=list(hands.trick_winners),
         phase=hands.phase,

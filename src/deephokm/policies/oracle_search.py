@@ -99,10 +99,20 @@ class _SearchContext:
 
 def _greedy_action(hands: HandState, seat: int, legal: list[int], ctx: _SearchContext) -> int:
     # play_from_state is the same decision act() makes from the equivalent
-    # observation (cheapest win, lowest discard, lead), minus the numpy
+    # observation, minus the numpy
     # observation build; a non-empty hand always has a legal card action, so
     # no mask is needed.
-    return ctx.greedy.play_from_state(hands.trump, hands.current_trick, seat, legal)
+    return ctx.greedy.play_from_state(
+        hands.trump,
+        hands.current_trick,
+        seat,
+        legal,
+        hand=hands.hands[seat],
+        played=hands.played,
+        played_by=hands.played_by,
+        void_suits=hands.void_suits,
+        tricks_won=hands.tricks_won,
+    )
 
 
 def _step(
@@ -135,11 +145,7 @@ def _oracle_value(engine: HokmEngine, remaining_depth: int, ctx: _SearchContext)
     # Always CARD_PLAY here (callers assert it; a card play can only exit it
     # via a completed hand, which returns before recursing). Inline the same
     # next-seat rule engine.current_seat() applies in CARD_PLAY.
-    seat = (
-        (hands.current_trick[-1][0] + 1) % NUM_SEATS
-        if hands.current_trick
-        else hands.leader
-    )
+    seat = (hands.current_trick[-1][0] + 1) % NUM_SEATS if hands.current_trick else hands.leader
     legal = engine.legal_actions(seat)
     controlled = seat in ctx.controlled_seats
 

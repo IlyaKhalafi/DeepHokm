@@ -16,6 +16,7 @@ from deephokm.policies.random_policy import RandomPolicy
 from deephokm.policies.search import (
     IIMCSearchPolicy,
     VoidTracker,
+    _clone_for_simulation,
     sample_determinized_hands,
 )
 from deephokm.rules.engine import HokmEngine
@@ -183,6 +184,21 @@ def test_observation_for_never_depends_on_other_seats_hands() -> None:
 
     for key in baseline:
         assert np.array_equal(baseline[key], perturbed_obs[key]), key
+
+
+def test_simulation_clone_copies_void_suits_without_aliasing() -> None:
+    engine = HokmEngine()
+    _play_to_card_play(engine, seed=2)
+    engine.state.hands.void_suits[1].add(0)
+    clone = _clone_for_simulation(
+        engine,
+        engine.current_seat(),
+        engine.state.hands.hands,
+    )
+
+    assert clone.state.hands.void_suits == engine.state.hands.void_suits
+    clone.state.hands.void_suits[1].add(2)
+    assert 2 not in engine.state.hands.void_suits[1]
 
 
 def test_decide_returns_a_legal_action_and_never_mutates_the_real_engine() -> None:

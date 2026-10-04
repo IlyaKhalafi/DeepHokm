@@ -26,6 +26,7 @@ from pathlib import Path
 import numpy as np
 
 from deephokm.env.spaces import Observation, mask_for, observation_for
+from deephokm.nn.feature_contract import resolve_feature_mode
 from deephokm.nn.features import build_features
 from deephokm.nn.numpy_qnet import NumpyQNet, load_weights
 from deephokm.policies.greedy_policy import GreedyPolicy
@@ -44,7 +45,9 @@ class PureQNetPolicy:
             :class:`~deephokm.policies.numpy_hybrid.NumpyHybridPolicy`.
     """
 
-    def __init__(self, weights: Path | dict[str, np.ndarray]) -> None:
+    def __init__(
+        self, weights: Path | dict[str, np.ndarray], *, feature_mode: str | None = None
+    ) -> None:
         """Create the policy.
 
         Args:
@@ -52,6 +55,7 @@ class PureQNetPolicy:
         """
         params = load_weights(weights) if isinstance(weights, Path) else weights
         self.net = NumpyQNet(params)
+        self.feature_mode = resolve_feature_mode(weights, self.net.input_planes, feature_mode)
         self.greedy = GreedyPolicy()
 
     def reset_hand(self) -> None:
@@ -82,7 +86,7 @@ class PureQNetPolicy:
         mask = mask_for(legal)
         if hands.phase is not Phase.CARD_PLAY:
             return self.greedy.act(observation, mask)
-        planes, scalars = build_features(observation, mask)
+        planes, scalars = build_features(observation, mask, feature_mode=self.feature_mode)
         values = self.net(planes[None], scalars[None])[0]
         return max(legal, key=lambda a: values[a])
 
@@ -101,7 +105,7 @@ class PureQNetPolicy:
             return int(legal[0])
         if legal[0] >= TRUMP_ACTION_OFFSET:
             return self.greedy.act(observation, action_mask)
-        planes, scalars = build_features(observation, action_mask)
+        planes, scalars = build_features(observation, action_mask, feature_mode=self.feature_mode)
         values = self.net(planes[None], scalars[None])[0]
         return int(max(legal, key=lambda a: values[a]))
 

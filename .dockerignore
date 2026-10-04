@@ -1,5 +1,12 @@
 # Never copy instruction sheets, machine-local values, or build outputs.
 CLAUDE.md
+.omo/
+scratch/
+data/
+scripts/*_20*.sh
+scripts/*q6144*.py
+configs/q6144_test_reservation.json
+beat_greedy_consult_prompt.txt
 REVIEW_LOG.local.md
 *.local.md
 tests/

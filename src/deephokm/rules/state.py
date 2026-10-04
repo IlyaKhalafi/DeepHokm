@@ -60,6 +60,9 @@ class HandState:
             same order -- ``seen``/``played`` carry card identity but not
             who played it, which an observation needs to let a player tell
             partner from opponent in the history of a hand.
+        void_suits: Per-seat suits that public play has proven the player no
+            longer holds. The engine updates this when a player cannot follow
+            the led suit; rollout policies reuse it without rescanning history.
         tricks_won: Per-team trick counts for this hand, index 0 = team A.
         trick_winners: Seat that won each completed trick, in order.
         phase: The current phase.
@@ -74,6 +77,7 @@ class HandState:
     current_trick: list[tuple[int, int]] = field(default_factory=list)
     played: list[int] = field(default_factory=list)
     played_by: list[int] = field(default_factory=list)
+    void_suits: list[set[int]] = field(default_factory=lambda: [set() for _ in range(NUM_SEATS)])
     tricks_won: list[int] = field(default_factory=lambda: [0, 0])
     trick_winners: list[int] = field(default_factory=list)
     phase: Phase = Phase.TRUMP_CALL

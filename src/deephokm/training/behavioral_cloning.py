@@ -1,7 +1,7 @@
 """Supervised behavioral-cloning warm start against the scripted baseline.
 
-Two straight from-scratch self-play runs (see ``REVIEW_LOG.local.md`` and the
-README's *Results* section) plateaued at essentially the same win rate
+Two straight from-scratch self-play runs (see ``docs/RESULTS_TABLES.md``)
+plateaued at essentially the same win rate
 against :class:`~deephokm.policies.greedy_policy.GreedyPolicy` (roughly
 0.10-0.24) regardless of gamma, reward shaping, or how much training-time
 exposure to it the self-play mix carried. An earlier probe already showed

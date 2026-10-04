@@ -9,13 +9,14 @@ The first full run (5M steps, sparse reward, gamma 0.997) never learned:
 an in-process Python object living in the training process — the forked
 workers kept the (empty) pool from the moment they were created, so the
 entire run was PPO against fixed random opponents rather than self-play, and
-a +/-1 match outcome ~150 steps away carries almost no gradient at gamma
-0.997 regardless. Both were fixed: opponents are now drawn from a snapshot
+a long-horizon credit-assignment problem was also suspected. The latter
+explanation was incorrect: gamma 0.997 retains about 64% of a reward after
+150 steps. Opponents are now drawn from a snapshot
 *directory* that every worker rescans on each `reset()` (the one channel a
 forked process actually shares with its parent), and the reference
 hyperparameters gained `target_kl`, a decaying learning rate, and a shorter,
-trick-reward-shaped discount (see `train.py:hyperparameters` and
-`REVIEW_LOG.local.md` for the controlled comparison behind that choice). A
+trick-reward-shaped discount in the initial follow-up; the later run restored
+gamma 0.997 (see `train.py:hyperparameters`). A
 behaviour-cloning probe against the scripted `GreedyPolicy` (0.79 test
 accuracy vs. a 0.46 random-legal baseline) confirmed the network can
 represent good play, isolating the original failure to training, not
@@ -66,14 +67,14 @@ this opponent style) and points at something that needs either much longer
 exposure or a redesigned self-play mix from the start of a run, not a late
 graft onto an already-converged policy.
 
-**Second completed run (current model).** 8M steps (~3.4 hours on GPU 6),
+**Second completed PPO run (historical).** 8M steps (~3.4 hours on GPU 6),
 seed 0, 32 parallel environments, the corrected hyperparameters described
 under *Training* (`gamma=0.997`, `hand_reward=0.15`, `trick_reward=0.0`,
 team-coherent self-play with `GreedyPolicy` folded into the primary mix).
 An intermediate attempt at `P_GREEDY=0.25` was aborted at 4.75M/8M steps
 after the gauntlet showed no improving trend against either random or
-greedy for the entire first 60% of the run — see `REVIEW_LOG.local.md` for
-that data. Cutting `P_GREEDY` to 0.10 and relaunching produced a stable,
+greedy for the entire first 60% of the run. Cutting `P_GREEDY` to 0.10 and
+relaunching produced a stable,
 non-stalled run; the table below is the mean of all 33 gauntlet rounds
 logged across the full run (`figures/gauntlet_win_rates.png` /
 `figures/training_scalars.png`, regenerate with `make plot`).

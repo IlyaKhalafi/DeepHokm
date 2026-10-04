@@ -15,6 +15,7 @@ import random
 from dataclasses import dataclass, field
 from typing import overload
 
+from deephokm.cards import SUIT_OF
 from deephokm.rules import dealing, legality, scoring, tricks
 from deephokm.rules.state import (
     NUM_SEATS,
@@ -128,6 +129,23 @@ class HokmEngine:
             seat = self.current_seat()
         return action in self.legal_actions(seat)
 
+    def _record_card_play(self, hands: HandState, seat: int, card: int) -> None:
+        """Apply the card-level state changes shared by every non-trump play."""
+        hands.remove_card(seat, card)
+        self._remember_void(hands, seat, card)
+        hands.current_trick.append((seat, card))
+        hands.played.append(card)
+        hands.played_by.append(seat)
+
+    @staticmethod
+    def _remember_void(hands: HandState, seat: int, card: int) -> None:
+        """Record the public inference made by an off-suit play."""
+        if not hands.current_trick:
+            return
+        led_suit = SUIT_OF[hands.current_trick[0][1]]
+        if SUIT_OF[card] != led_suit:
+            hands.void_suits[seat].add(led_suit)
+
     def _validate_turn(self, seat: int | None) -> int:
         """Resolve the acting seat (defaulting to current) and check it is its turn."""
         if seat is None:
@@ -207,10 +225,7 @@ class HokmEngine:
             return ActionOutcome(seat=seat, action=action, trump=suit)
 
         card = action
-        hands.remove_card(seat, card)
-        hands.current_trick.append((seat, card))
-        hands.played.append(card)
-        hands.played_by.append(seat)
+        self._record_card_play(hands, seat, card)
 
         if len(hands.current_trick) < NUM_SEATS:
             # Mid-trick, non-terminal: the fast-path caller only needs to

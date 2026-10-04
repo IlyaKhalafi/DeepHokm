@@ -7,7 +7,7 @@ from collections import Counter
 
 import pytest
 
-from deephokm.cards import NUM_CARDS, NUM_SUITS
+from deephokm.cards import NUM_CARDS, NUM_SUITS, suit_of
 from deephokm.rules import HokmEngine, legality
 from deephokm.rules.state import (
     CARDS_PER_PLAYER,
@@ -119,6 +119,33 @@ def test_playing_removes_card_from_hand() -> None:
     assert eng.state.hands.on_table() == [card]
 
 
+def test_engine_records_a_player_who_cannot_follow_suit() -> None:
+    for seed in range(100):
+        eng = make_engine(seed)
+        eng.apply_action(52)
+        leader = eng.current_seat()
+        follower = (leader + 1) % NUM_SEATS
+        lead = next(
+            (
+                card
+                for card in eng.state.hands.hands[leader]
+                if all(suit_of(other) != suit_of(card) for other in eng.state.hands.hands[follower])
+            ),
+            None,
+        )
+        if lead is None:
+            continue
+
+        led_suit = int(suit_of(lead))
+        eng.apply_action(lead, seat=leader)
+        legal = eng.legal_actions(follower)
+        assert all(int(suit_of(card)) != led_suit for card in legal)
+        eng.apply_action(legal[0], seat=follower)
+        assert led_suit in eng.state.hands.void_suits[follower]
+        return
+    raise AssertionError("could not find a deterministic void-suit fixture")
+
+
 def test_actions_after_match_over_raise() -> None:
     eng = play_random_match(6)
     assert eng.state.winner is not None
@@ -226,6 +253,7 @@ def test_hand_completion_transitions_and_deals() -> None:
             expected = HAKEM_FIRST_BATCH if seat == new_hakem else 0
             assert len(hand) == expected
         assert eng.state.hand_number == 2
+        assert all(not suits for suits in eng.state.hands.void_suits)
 
 
 def test_hakem_rotation_matches_rules() -> None:

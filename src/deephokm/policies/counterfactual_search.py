@@ -101,7 +101,17 @@ def rollout_to_hand_end(
         # than a current_seat() call per ply.
         seat = (hands.current_trick[-1][0] + 1) % NUM_SEATS if hands.current_trick else hands.leader
         legal = engine.legal_actions(seat)
-        action = greedy.play_from_state(hands.trump, hands.current_trick, seat, legal)
+        action = greedy.play_from_state(
+            hands.trump,
+            hands.current_trick,
+            seat,
+            legal,
+            hand=hands.hands[seat],
+            played=hands.played,
+            played_by=hands.played_by,
+            void_suits=hands.void_suits,
+            tricks_won=hands.tricks_won,
+        )
         outcome = engine.apply_action(action, seat=seat, _legal=legal)
         # None: mid-trick, non-terminal play on the _legal fast path.
         if outcome is not None and outcome.hand_complete:
