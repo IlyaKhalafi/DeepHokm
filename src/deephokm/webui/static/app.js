@@ -4,6 +4,13 @@
 const SUITS = ["♣", "♦", "♥", "♠"]; // clubs, diamonds, hearts, spades
 const SUIT_NAMES = ["Clubs", "Diamonds", "Hearts", "Spades"];
 const RED_SUITS = new Set([1, 2]);
+const POLICY_LABELS = {
+  "numpy-qnet-only": "Fast Q-pure",
+  "numpy-qnet+elimination-search": "Hard Q-hybrid",
+  "maskable-ppo": "MaskablePPO fallback",
+  "greedy-baseline": "Greedy baseline",
+  "random-baseline": "Random baseline",
+};
 
 const AUTO_PLAY_MS = 900;
 
@@ -19,12 +26,18 @@ function setStatus(text, isError = false) {
   el.classList.toggle("error", isError);
 }
 
+function policyLabel(gameState) {
+  return POLICY_LABELS[gameState.policy]
+    || (gameState.difficulty === "hard" ? "Hard Q-hybrid" : "Fast Q-pure");
+}
+
 function updateStatusFromState() {
   if (!state) return;
   const banner = $("mode-banner");
   banner.classList.toggle("hidden", state.mode !== "spectate");
   if (state.mode === "spectate") {
-    banner.textContent = "Spectator view — four AI players; no hands are shown.";
+    const strength = policyLabel(state);
+    banner.textContent = `Spectator view — four ${strength} players; no hands are shown.`;
     setStatus(
       state.terminal
         ? "Match over."
@@ -37,7 +50,9 @@ function updateStatusFromState() {
   } else if (state.current_seat === state.viewer_seat) {
     setStatus(state.phase === "TRUMP_CALL" ? "Your call: choose trump." : "Your turn: play a card.");
   } else {
-    setStatus("The model is thinking…");
+    setStatus(state.policy === "numpy-qnet+elimination-search"
+      ? "Hard mode is searching…"
+      : `${policyLabel(state)} is thinking…`);
   }
 }
 
@@ -136,6 +151,7 @@ function render() {
   $("phase").textContent = state.terminal
     ? phaseText
     : `${phaseText} · hand #${state.hand_number}`;
+  $("difficulty-badge").textContent = policyLabel(state);
 
   // seats: highlight the active one
   for (let seat = 0; seat < 4; seat++) {
@@ -385,13 +401,17 @@ async function startGame() {
   // No seed is sent: the server picks one. The API still accepts an explicit
   // seed for reproducing a deal, which is what the evaluation harness uses.
   const mode = $("mode").value;
-  const body = { mode };
+  const difficulty = $("difficulty").value;
+  const body = { mode, difficulty };
   try {
     state = await api("/api/games", { method: "POST", body: JSON.stringify(body) });
     gameId = state.game_id;
     $("setup").classList.add("hidden");
     $("game").classList.remove("hidden");
-    setStatus(mode === "human" ? "You play seat 0; the model plays the rest." : "Spectating AI vs AI.");
+    const strength = policyLabel(state);
+    setStatus(mode === "human"
+      ? `You play seat 0; ${strength} plays the rest.`
+      : `Spectating ${strength} vs ${strength}.`);
     render();
   } catch (err) {
     setStatus(err.message, true);
@@ -411,6 +431,13 @@ function stopAuto() {
   if (autoTimer) clearTimeout(autoTimer);
   autoTimer = null;
   $("auto").textContent = "Auto-play";
+}
+
+function updateDifficultyHelp() {
+  const hard = $("difficulty").value === "hard";
+  $("difficulty-help").textContent = hard
+    ? "Hard uses the K=6144-trained Q-hybrid network plus live search."
+    : "Fast uses direct network inference for quick replies.";
 }
 
 function toggleAuto() {
@@ -448,6 +475,8 @@ window.__deephokmRender = (externalState) => {
 
 document.addEventListener("DOMContentLoaded", () => {
   $("start").addEventListener("click", startGame);
+  $("difficulty").addEventListener("change", updateDifficultyHelp);
+  updateDifficultyHelp();
   $("newgame").addEventListener("click", () => {
     stopAuto();
     $("game").classList.add("hidden");
@@ -474,6 +503,12 @@ async function showEngine() {
     const info = await response.json();
     if (!info.model_loaded) {
       el.textContent = "engine: scripted baseline (no network weights loaded)";
+      return;
+    }
+    if (info.modes) {
+      const hard = info.modes.hard;
+      const worlds = hard.search_k === 1 ? "world" : "worlds";
+      el.textContent = `engines: Fast Q-pure · Hard Q-hybrid (trained K=${hard.training_k}, live ${hard.search_k} ${worlds})`;
       return;
     }
     const k = info.search_k ? `${info.search_k} sampled worlds/decision` : "";

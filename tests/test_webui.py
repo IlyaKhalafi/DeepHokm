@@ -16,9 +16,16 @@ from deephokm.cards import NUM_CARDS
 from deephokm.env import HokmEnv
 from deephokm.nn.policy import HokmMaskablePolicy
 from deephokm.policies.greedy_policy import GreedyPolicy
+from deephokm.policies.numpy_hybrid import NumpyHybridPolicy
+from deephokm.policies.pure_qnet_policy import PureQNetPolicy
 from deephokm.policies.random_policy import RandomPolicy
 from deephokm.rules.state import HAKEM_FIRST_BATCH, NUM_SEATS
 from deephokm.webui.app import app
+from deephokm.webui.search_serving import (
+    HARD_TRAINING_K,
+    SearchServedPolicy,
+    load_shared_weights,
+)
 from deephokm.webui.serving import ServedPolicy
 from deephokm.webui.state import GameStore
 
@@ -100,6 +107,7 @@ def test_greedy_policy_mode_skips_model_loading(monkeypatch: pytest.MonkeyPatch)
         served = app_module.get_served()
         assert isinstance(served, GreedyPolicy)
         assert isinstance(app_module._fresh_policy(), GreedyPolicy)
+        assert app_module._policy_name(served) == "greedy-baseline"
         assert app_module.health()["policy"] == "greedy-baseline"
     finally:
         if hasattr(app_module.app.state, "model"):
@@ -107,10 +115,77 @@ def test_greedy_policy_mode_skips_model_loading(monkeypatch: pytest.MonkeyPatch)
         app_module.app.state.model_disabled = False
 
 
+def test_fast_and_hard_build_distinct_q_policies(monkeypatch: pytest.MonkeyPatch) -> None:
+    fast_weights = load_shared_weights("checkpoints/qnet_numpy_full.npz")
+    hard_weights = load_shared_weights("checkpoints/qhybrid_k6144.npz")
+    prototype = SearchServedPolicy(fast_weights, search_k=0)
+    monkeypatch.setattr(app_module, "get_served", lambda: prototype)
+    monkeypatch.setattr(app_module, "resolve_hard_search_k", lambda: 7)
+    monkeypatch.setattr(app_module, "resolve_workers", lambda: 1)
+    monkeypatch.setattr(app_module.app.state, "fast_weights", fast_weights, raising=False)
+    monkeypatch.setattr(app_module.app.state, "hard_weights", hard_weights, raising=False)
+    monkeypatch.setattr(app_module.app.state, "model", prototype, raising=False)
+
+    fast = app_module._fresh_policy("fast")
+    hard = app_module._fresh_policy("hard")
+
+    assert isinstance(fast, SearchServedPolicy)
+    assert isinstance(fast.policy, PureQNetPolicy)
+    assert isinstance(hard, SearchServedPolicy)
+    assert isinstance(hard.policy, NumpyHybridPolicy)
+    assert fast.policy.net.params is fast_weights.params
+    assert hard.policy.net.params is hard_weights.params
+    assert fast.policy.feature_mode == "baseline"
+    assert hard.policy.feature_mode == "trick_context"
+    assert hard_weights.training_k == HARD_TRAINING_K
+    assert fast_weights.sha256 != hard_weights.sha256
+    assert hard.policy.verify_samples == 7
+    assert hard.policy.eliminate is True
+    assert app_module._policy_name(fast) == "numpy-qnet-only"
+    assert app_module._policy_name(hard) == "numpy-qnet+elimination-search"
+    modes = app_module.health()["modes"]
+    assert modes["fast"] == {
+        "policy": "numpy-qnet-only",
+        "search_k": 0,
+        "search_workers": 0,
+        "weights_sha256": fast_weights.sha256,
+    }
+    assert modes["hard"] == {
+        "policy": "numpy-qnet+elimination-search",
+        "search_k": 7,
+        "search_workers": 1,
+        "training_k": 6144,
+        "weights_sha256": "6dbc75e4bc98752a46b8549ba2b604f8e5c10893fe2a85aaefddb4c0c4170986",
+    }
+
+
+def test_startup_rejects_fast_archive_reused_for_hard(monkeypatch: pytest.MonkeyPatch) -> None:
+    fast_path = "checkpoints/qnet_numpy_full.npz"
+    monkeypatch.setenv("DEEPHOKM_QNET", fast_path)
+    monkeypatch.setenv("DEEPHOKM_HARD_QNET", fast_path)
+    if hasattr(app_module.app.state, "model"):
+        del app_module.app.state.model
+    app_module.app.state.model_disabled = False
+    try:
+        with pytest.raises(ValueError, match="training_k=6144"):
+            app_module.get_served()
+    finally:
+        if hasattr(app_module.app.state, "model"):
+            del app_module.app.state.model
+        app_module.app.state.model_disabled = False
+
+
+def test_fresh_policy_rejects_unknown_difficulty() -> None:
+    with pytest.raises(ValueError, match="unknown difficulty"):
+        app_module._fresh_policy("medium")
+
+
 def test_index_serves_html(client: TestClient) -> None:
     response = client.get("/")
     assert response.status_code == 200
     assert "DeepHokm" in response.text
+    assert 'option value="fast"' in response.text
+    assert 'option value="hard"' in response.text
     assert "text/html" in response.headers["content-type"]
 
 
@@ -132,6 +207,8 @@ def test_create_human_game(client: TestClient) -> None:
     assert response.status_code == 201
     state = response.json()
     assert state["mode"] == "human"
+    assert state["difficulty"] == "fast"
+    assert state["policy"] == "maskable-ppo"
     assert state["viewer_seat"] == 0
     assert state["phase"] in ("TRUMP_CALL", "CARD_PLAY")
     if state["phase"] == "TRUMP_CALL":
@@ -145,10 +222,23 @@ def test_create_game_default_mode(client: TestClient) -> None:
     response = client.post("/api/games", json={})
     assert response.status_code == 201
     assert response.json()["mode"] == "human"
+    assert response.json()["difficulty"] == "fast"
+
+
+def test_create_hard_game(client: TestClient) -> None:
+    response = client.post("/api/games", json={"mode": "human", "difficulty": "hard", "seed": 43})
+    assert response.status_code == 201
+    assert response.json()["difficulty"] == "hard"
+    assert response.json()["policy"] == "maskable-ppo"
 
 
 def test_create_game_rejects_bad_mode(client: TestClient) -> None:
     response = client.post("/api/games", json={"mode": "nonsense"})
+    assert response.status_code == 422
+
+
+def test_create_game_rejects_bad_difficulty(client: TestClient) -> None:
+    response = client.post("/api/games", json={"difficulty": "medium"})
     assert response.status_code == 422
 
 

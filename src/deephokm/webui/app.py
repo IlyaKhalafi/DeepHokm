@@ -23,15 +23,19 @@ from pydantic import BaseModel, Field
 from deephokm.policies.greedy_policy import GreedyPolicy
 from deephokm.rules.legality import NUM_ACTIONS
 from deephokm.webui.search_serving import (
+    HARD_TRAINING_K,
     SearchServedPolicy,
     describe_policy,
+    describe_search_mode,
     load_shared_weights,
-    resolve_search_k,
+    resolve_hard_search_k,
+    resolve_hard_weights_path,
     resolve_weights_path,
     resolve_workers,
 )
 from deephokm.webui.serving import ServedPolicy, build_opponents, resolve_model_path
 from deephokm.webui.state import (
+    GameDifficulty,
     GameStore,
     advance_one_ply,
     apply_human_action,
@@ -51,10 +55,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     deliberately want random opponents set DEEPHOKM_ALLOW_RANDOM_MODEL=1.
     """
     served = get_served()
+    if isinstance(served, SearchServedPolicy) and resolve_workers() > 1:
+        # Fork the shared hard-mode pool during single-threaded startup.
+        _get_search_pool(resolve_workers())
     allow_random = os.environ.get("DEEPHOKM_ALLOW_RANDOM_MODEL", "") == "1"
     if served is None and not allow_random:
         raise RuntimeError(
-            f"no network weights at {resolve_weights_path()} and no checkpoint at "
+            f"no Fast network weights at {resolve_weights_path()} and no checkpoint at "
             f"{resolve_model_path()}; set DEEPHOKM_QNET or DEEPHOKM_MODEL, or set "
             "DEEPHOKM_ALLOW_RANDOM_MODEL=1 for random opponents"
         )
@@ -65,6 +72,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if pool is not None:
             pool.close()
             pool.join()
+            del app.state.search_pool
 
 
 app = FastAPI(title="DeepHokm", version="0.1.0", lifespan=lifespan)
@@ -74,6 +82,7 @@ class CreateGameRequest(BaseModel):
     """Request body for POST /api/games."""
 
     mode: str = Field(default="human", pattern="^(human|spectate)$")
+    difficulty: GameDifficulty = "fast"
     seed: int | None = Field(default=None, ge=0, le=2**31 - 1)
 
 
@@ -126,15 +135,29 @@ def get_served() -> SearchServedPolicy | ServedPolicy | GreedyPolicy | None:
             weights = resolve_weights_path()
             checkpoint = resolve_model_path()
             if os.path.isfile(weights):
-                # Cache the weights, not a policy: each game needs its own
-                # policy object because a policy holds the engine it decides
-                # for, and concurrent games would overwrite one another.
-                app.state.weights = load_shared_weights(weights)
+                hard_weights_path = resolve_hard_weights_path()
+                if not os.path.isfile(hard_weights_path):
+                    raise FileNotFoundError(
+                        f"Hard-mode K={HARD_TRAINING_K} weights not found at "
+                        f"{hard_weights_path}; set DEEPHOKM_HARD_QNET"
+                    )
+                # Cache both archives, not policy instances: each game needs
+                # a policy object of its own because it holds the engine it
+                # decides for. Fast and Hard deliberately use different
+                # networks; the latter was trained on K=6144 teacher data.
+                fast_weights = load_shared_weights(weights)
+                hard_weights = load_shared_weights(hard_weights_path)
+                if hard_weights.training_k != HARD_TRAINING_K:
+                    contract_path = hard_weights.path.with_suffix(".features.json")
+                    raise ValueError(
+                        f"Hard-mode weights must declare training_k={HARD_TRAINING_K} "
+                        f"in {contract_path}"
+                    )
+                app.state.fast_weights = fast_weights
+                app.state.hard_weights = hard_weights
                 app.state.model = SearchServedPolicy(
-                    app.state.weights,
-                    search_k=resolve_search_k(),
-                    workers=resolve_workers(),
-                    pool=_get_search_pool(resolve_workers()),
+                    fast_weights,
+                    search_k=0,
                 )
             elif os.path.isfile(checkpoint):
                 app.state.model = ServedPolicy(checkpoint)
@@ -143,7 +166,9 @@ def get_served() -> SearchServedPolicy | ServedPolicy | GreedyPolicy | None:
         return getattr(app.state, "model", None)
 
 
-def _fresh_policy() -> SearchServedPolicy | ServedPolicy | GreedyPolicy | None:
+def _fresh_policy(
+    difficulty: GameDifficulty = "fast",
+) -> SearchServedPolicy | ServedPolicy | GreedyPolicy | None:
     """A policy instance for one game.
 
     The search policy is rebuilt per game so that each game owns the engine
@@ -151,17 +176,35 @@ def _fresh_policy() -> SearchServedPolicy | ServedPolicy | GreedyPolicy | None:
     are shared. The reinforcement-learning checkpoint is stateless across
     episodes, so the memoized instance is reused as-is.
     """
+    if difficulty not in {"fast", "hard"}:
+        raise ValueError(f"unknown difficulty {difficulty!r}")
     served = get_served()
     if isinstance(served, SearchServedPolicy):
+        search_k = resolve_hard_search_k() if difficulty == "hard" else 0
+        workers = resolve_workers() if difficulty == "hard" else 1
+        weights = app.state.hard_weights if difficulty == "hard" else app.state.fast_weights
         return SearchServedPolicy(
-            app.state.weights,
-            search_k=resolve_search_k(),
-            workers=resolve_workers(),
-            pool=_get_search_pool(resolve_workers()),
+            weights,
+            search_k=search_k,
+            workers=workers,
+            pool=_get_search_pool(workers) if difficulty == "hard" else None,
         )
     if isinstance(served, GreedyPolicy):
         return GreedyPolicy()
     return served
+
+
+def _policy_name(policy: SearchServedPolicy | ServedPolicy | GreedyPolicy | None) -> str:
+    """Return the stable public identifier for a per-game policy."""
+    if isinstance(policy, SearchServedPolicy):
+        name = describe_policy(policy)["policy"]
+        assert isinstance(name, str)
+        return name
+    if isinstance(policy, ServedPolicy):
+        return "maskable-ppo"
+    if isinstance(policy, GreedyPolicy):
+        return "greedy-baseline"
+    return "random-baseline"
 
 
 @app.get("/health")
@@ -174,6 +217,18 @@ def health() -> dict[str, Any]:
         "games": len(_store._games),
     }
     payload.update(describe_policy(model if isinstance(model, SearchServedPolicy) else None))
+    if isinstance(model, SearchServedPolicy):
+        payload["modes"] = {
+            "fast": {
+                **describe_search_mode(search_k=0, workers=0),
+                "weights_sha256": app.state.fast_weights.sha256,
+            },
+            "hard": {
+                **describe_search_mode(search_k=resolve_hard_search_k(), workers=resolve_workers()),
+                "training_k": app.state.hard_weights.training_k,
+                "weights_sha256": app.state.hard_weights.sha256,
+            },
+        }
     return payload
 
 
@@ -181,10 +236,13 @@ def health() -> dict[str, Any]:
 def create_game(request: CreateGameRequest) -> JSONResponse:
     """Create a game and return its initial public state."""
     seed = request.seed if request.seed is not None else _random.randrange(2**31)
+    policy = _fresh_policy(request.difficulty)
     record = _store.create(
         mode=request.mode,
         seed=seed,
-        opponents=build_opponents(_fresh_policy()),
+        opponents=build_opponents(policy),
+        difficulty=request.difficulty,
+        policy=_policy_name(policy),
     )
     return JSONResponse(public_state(record), status_code=201)
 

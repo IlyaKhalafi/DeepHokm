@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "feature_mode": "trick_context",
+  "input_planes": 36,
+  "public_features_sha256": "f90203b827b4b0135a96429fe2665d9b103c40777e65e9c62a914ec109b80210",
+  "weights_sha256": "6dbc75e4bc98752a46b8549ba2b604f8e5c10893fe2a85aaefddb4c0c4170986",
+  "training_k": 6144
+}

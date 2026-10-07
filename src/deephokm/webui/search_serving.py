@@ -7,9 +7,11 @@ action-value network nominating and ordering, with the determinized search
 confirming, which reaches 0.841 against a greedy opposing team at high search
 budgets.
 
-Search strength is a latency trade, so it is configurable. At the default
-budget a decision costs well under a second, which keeps the UI responsive;
-raising ``DEEPHOKM_SEARCH_K`` buys strength at proportional cost.
+Search strength is a latency trade. The web UI exposes both ends directly:
+``fast`` runs the compact network alone, while ``hard`` uses the separate
+network trained on K=6144 teacher data and adds live search. The live Hard-mode
+budget is configurable with ``DEEPHOKM_HARD_SEARCH_K``; it is intentionally
+independent of the offline training K.
 
 The environment hands opponents only an observation and a mask, but the search
 needs the live engine, so the game store attaches it after construction. Voids
@@ -20,8 +22,11 @@ and re-deriving is both simpler and impossible to desynchronise.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import threading
+from dataclasses import dataclass
 from multiprocessing.pool import Pool
 from pathlib import Path
 
@@ -29,7 +34,8 @@ import numpy as np
 
 from deephokm.cards import NUM_RANKS
 from deephokm.env.spaces import Observation
-from deephokm.nn.numpy_qnet import load_weights
+from deephokm.nn.feature_contract import resolve_feature_mode
+from deephokm.nn.numpy_qnet import NumpyQNet, load_weights
 from deephokm.policies.greedy_policy import GreedyPolicy
 from deephokm.policies.numpy_hybrid import NumpyHybridPolicy
 from deephokm.policies.pure_qnet_policy import PureQNetPolicy
@@ -37,10 +43,23 @@ from deephokm.rules.engine import HokmEngine
 from deephokm.rules.state import NUM_SEATS, TRICKS_PER_HAND, Phase
 
 DEFAULT_WEIGHTS = "checkpoints/qnet_numpy_full.npz"
-# 0: serve the network alone, no live search (see resolve_search_k). Search
-# is what the offline teacher labels this network trained on used, not what
-# runs at play time; raising this past 0 opts into live search instead.
+DEFAULT_HARD_WEIGHTS = "checkpoints/qhybrid_k6144.npz"
+HARD_TRAINING_K = 6144
+# The constructor stays pure-network by default. The web app opts hard-mode
+# games into the separate live-search budget below.
 DEFAULT_SEARCH_K = 0
+DEFAULT_HARD_SEARCH_K = 384
+
+
+@dataclass(frozen=True, slots=True)
+class SharedWeights:
+    """Validated metadata and parameters for one cached weight archive."""
+
+    params: dict[str, np.ndarray]
+    path: Path
+    feature_mode: str
+    sha256: str
+    training_k: int | None
 
 
 class SearchServedPolicy:
@@ -54,7 +73,7 @@ class SearchServedPolicy:
 
     def __init__(
         self,
-        weights: dict[str, np.ndarray],
+        weights: SharedWeights | dict[str, np.ndarray],
         *,
         search_k: int = DEFAULT_SEARCH_K,
         eliminate: bool = True,
@@ -95,13 +114,20 @@ class SearchServedPolicy:
                 ``search_k`` is 0.
 
         """
+        params = weights.params if isinstance(weights, SharedWeights) else weights
+        feature_mode = weights.feature_mode if isinstance(weights, SharedWeights) else None
         self.policy: NumpyHybridPolicy | PureQNetPolicy
         if search_k <= 0:
-            self.policy = PureQNetPolicy(weights)
+            self.policy = PureQNetPolicy(params, feature_mode=feature_mode)
         else:
             self.policy = NumpyHybridPolicy(
-                weights, verify_samples=search_k, eliminate=eliminate, seed=seed,
-                workers=workers, pool=pool,
+                params,
+                verify_samples=search_k,
+                eliminate=eliminate,
+                seed=seed,
+                workers=workers,
+                pool=pool,
+                feature_mode=feature_mode,
             )
         self.greedy = GreedyPolicy()
         self.engine: HokmEngine | None = None
@@ -162,10 +188,10 @@ class SearchServedPolicy:
 
 
 _weights_lock = threading.Lock()
-_weights_cache: dict[str, dict[str, np.ndarray]] = {}
+_weights_cache: dict[str, SharedWeights] = {}
 
 
-def load_shared_weights(path: str) -> dict[str, np.ndarray]:
+def load_shared_weights(path: str) -> SharedWeights:
     """Load a weight archive once per process and share it across games.
 
     The arrays are only read during inference, so one copy serves every game;
@@ -176,19 +202,36 @@ def load_shared_weights(path: str) -> dict[str, np.ndarray]:
     Raises:
         FileNotFoundError: If the archive is missing.
     """
-    if not Path(path).is_file():
+    weights_path = Path(path)
+    if not weights_path.is_file():
         raise FileNotFoundError(f"numpy weights not found at {path}; set DEEPHOKM_QNET")
     with _weights_lock:
         cached = _weights_cache.get(path)
         if cached is None:
-            cached = load_weights(Path(path))
+            params = load_weights(weights_path)
+            input_planes = NumpyQNet(params).input_planes
+            feature_mode = resolve_feature_mode(weights_path, input_planes, explicit=None)
+            contract_path = weights_path.with_suffix(".features.json")
+            contract = json.loads(contract_path.read_text()) if contract_path.is_file() else {}
+            cached = SharedWeights(
+                params=params,
+                path=weights_path,
+                feature_mode=feature_mode,
+                sha256=hashlib.sha256(weights_path.read_bytes()).hexdigest(),
+                training_k=contract.get("training_k"),
+            )
             _weights_cache[path] = cached
     return cached
 
 
 def resolve_weights_path() -> str:
     """Return the numpy weight path from the environment (or the default)."""
-    return os.environ.get("DEEPHOKM_QNET", DEFAULT_WEIGHTS)
+    return os.environ.get("DEEPHOKM_QNET") or DEFAULT_WEIGHTS
+
+
+def resolve_hard_weights_path() -> str:
+    """Return the K=6144-trained Hard-mode weight path."""
+    return os.environ.get("DEEPHOKM_HARD_QNET") or DEFAULT_HARD_WEIGHTS
 
 
 def resolve_search_k() -> int:
@@ -205,6 +248,19 @@ def resolve_search_k() -> int:
     return max(0, value)
 
 
+def resolve_hard_search_k() -> int:
+    """Return the positive live-search budget used by hard mode."""
+    raw = os.environ.get("DEEPHOKM_HARD_SEARCH_K")
+    if raw is None:
+        legacy = resolve_search_k()
+        return legacy if legacy > 0 else DEFAULT_HARD_SEARCH_K
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_HARD_SEARCH_K
+    return value if value > 0 else DEFAULT_HARD_SEARCH_K
+
+
 def resolve_workers() -> int:
     """Return the parallel scorer process count from the environment.
 
@@ -219,23 +275,29 @@ def resolve_workers() -> int:
     return max(1, min(value, os.cpu_count() or 1))
 
 
+def describe_search_mode(search_k: int, workers: int) -> dict[str, object]:
+    """Describe a Q-pure or Q-hybrid serving configuration."""
+    if search_k <= 0:
+        return {"policy": "numpy-qnet-only", "search_k": 0, "search_workers": 0}
+    return {
+        "policy": "numpy-qnet+elimination-search",
+        "search_k": search_k,
+        "search_workers": workers,
+    }
+
+
 def describe_policy(policy: SearchServedPolicy | None) -> dict[str, object]:
     """Summarise the served policy for the health endpoint."""
     if policy is None:
         return {"policy": "greedy-baseline", "search_k": 0}
     inner = policy.policy
     if isinstance(inner, PureQNetPolicy):
-        payload: dict[str, object] = {
-            "policy": "numpy-qnet-only",
-            "search_k": 0,
-            "search_workers": 0,
-        }
+        payload = describe_search_mode(search_k=0, workers=0)
     else:
-        payload = {
-            "policy": "numpy-qnet+elimination-search",
-            "search_k": inner.verify_samples,
-            "search_workers": inner.workers,
-        }
+        payload = describe_search_mode(
+            search_k=inner.verify_samples,
+            workers=inner.workers,
+        )
     # A hand stops at seven tricks for either team; 13 is the cap, not the
     # length.
     payload["max_tricks_per_hand"] = TRICKS_PER_HAND
@@ -243,9 +305,16 @@ def describe_policy(policy: SearchServedPolicy | None) -> dict[str, object]:
 
 
 __all__ = [
+    "DEFAULT_HARD_WEIGHTS",
+    "DEFAULT_HARD_SEARCH_K",
     "DEFAULT_SEARCH_K",
+    "HARD_TRAINING_K",
     "SearchServedPolicy",
+    "SharedWeights",
     "describe_policy",
+    "describe_search_mode",
+    "resolve_hard_search_k",
+    "resolve_hard_weights_path",
     "resolve_search_k",
     "resolve_weights_path",
     "resolve_workers",

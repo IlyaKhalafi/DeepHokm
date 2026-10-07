@@ -5,11 +5,12 @@ convolutional action-value network guiding a determinized search.
 
 Beats a scripted greedy opponent in **85.5%** of matches (399 held-out matches,
 95% CI [0.820, 0.889]) when paired with a live determinized search. The
-default deployment serves the network alone instead -- no search, no
-rollouts, an 18 ms decision -- which measures **66.3%** (80 held-out matches,
-95% CI [0.559, 0.766]). Both are the same trained weights; search is a
-deployment choice traded against latency, not a different model (see
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) to enable it).
+Fast mode serves the compact network alone -- no search, no rollouts, an 18 ms
+decision -- which measures **66.3%** (80 held-out matches, 95% CI
+[0.559, 0.766]). Hard mode uses a distinct Q-hybrid network trained from
+**K=6144 teacher data**, then adds live search (K=384 by default). The offline
+training K and live search K are separate controls; see
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 **No deep-learning framework in the default inference path.** Inference is
 NumPy; PyTorch trains the network and converts its weights. Torch-free

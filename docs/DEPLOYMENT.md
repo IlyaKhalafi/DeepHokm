@@ -7,23 +7,25 @@ Running the web UI locally, in Docker, and the configuration surface.
 The served policy is selected by `DEEPHOKM_POLICY`: `network` (the default)
 uses the numpy action-value network, while `greedy` runs the deterministic
 public-information heuristic without loading weights. `DEEPHOKM_QNET` points
-at the weight archive; `DEEPHOKM_SEARCH_K` (default `0`) sets how many
-determinized worlds each decision samples from a live search paired with
-the network, trading latency for strength -- `0` is the network alone (no
-search, no rollouts, an 18 ms decision, 0.663 against a greedy opposing
-team); raising it past `0` adds live search on top of the same weights (3072
-reaches the measured ceiling of 0.855, at seconds per decision --
-`DEEPHOKM_SEARCH_WORKERS` parallelizes the rollouts to keep that
-interactive). The K used to generate this network's own training labels
-(up to 6144, see `METHODS_AND_RESULTS.md`) is a separate, offline,
-one-time cost that never runs at serve time regardless of this setting.
+at the Fast Q-pure archive. `DEEPHOKM_HARD_QNET` points at the distinct Hard
+Q-hybrid archive trained from K=6144 teacher data. Players choose Fast
+(network inference only) or Hard (the K=6144-trained network plus live search)
+for each game. Startup validates the Hard archive against its feature contract,
+including the recorded training K and weight hash, instead of silently reusing
+the Fast model.
+`DEEPHOKM_HARD_SEARCH_K` (default `384`) controls the Hard-mode search budget;
+Fast never runs search. Higher Hard budgets trade latency for strength (3072
+was measured at seconds per decision -- `DEEPHOKM_SEARCH_WORKERS` parallelizes
+the rollouts to keep large budgets interactive). The training K=6144 is a
+separate, offline, one-time cost that never runs at serve time regardless of
+the live search setting.
 
 ```bash
 make webui            # serves on ${DEEPHOKM_PORT}
 ```
 
-Two modes: play seat 0 against the trained policy, or spectate AI-vs-AI one
-decision at a time (with auto-play). The UI always shows your hand, the
+Choose human play or AI-vs-AI spectating, then choose Fast or Hard strength.
+Spectating advances one decision at a time (with auto-play). The UI shows the
 table with seat attribution and trick order, trump, per-team tricks and game
 points, whose turn it is, the current phase, and explicit card counts per
 seat; illegal cards are visibly disabled and rejected server-side.
@@ -47,17 +49,19 @@ docker run --rm -p "${DEEPHOKM_PORT}:${DEEPHOKM_PORT}" --tmpfs /tmp \
   --env-file .env deephokm-web:latest
 ```
 
-The image is a multi-stage uv build. The numpy Q-network weights
-(`checkpoints/qnet_numpy_full.npz`, committed to the repository) are baked
-in by default — the same file `make webui` serves locally, so a fresh
-`docker compose up --build` plays at the measured 0.855 win rate out of the
-box. To bake a different weight archive instead, set `DEEPHOKM_QNET` in
-`.env` to its repo-relative path before building.
+The image is a multi-stage uv build. Both numpy Q-network archives are
+committed and baked in by default: `checkpoints/qnet_numpy_full.npz` for Fast
+and `checkpoints/qhybrid_k6144.npz` for Hard. The Hard archive ships with a
+feature contract recording K=6144 and its exact hash, so a fresh
+`docker compose up --build` supports both modes immediately. To bake different
+archives, set `DEEPHOKM_QNET`, `DEEPHOKM_HARD_QNET`, and the matching
+`DEEPHOKM_HARD_QNET_CONTRACT` in `.env` before building.
 
-At run time a read-only bind mount can override the baked weights: set
-`DEEPHOKM_MODEL_PATH` in `.env` (absolute or relative to the compose file;
-it defaults to the repository's own `checkpoints/qnet_numpy_full.npz`, so
-the mount is a no-op override rather than a requirement). The container
+At run time read-only bind mounts can override the baked weights. Set
+`DEEPHOKM_MODEL_PATH`, `DEEPHOKM_HARD_MODEL_PATH`, and the matching
+`DEEPHOKM_HARD_MODEL_CONTRACT_PATH` in `.env` (absolute or relative to the
+compose file). Their defaults are the repository archives, so the mounts are
+no-op overrides rather than requirements. The container
 never reserves a GPU device at all: numpy inference runs on CPU in ~30 ms
 regardless (see `src/deephokm/nn/numpy_qnet.py`), so a mandatory device
 reservation would only break `docker compose up` on a machine with no

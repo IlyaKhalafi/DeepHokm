@@ -34,11 +34,14 @@ logs/
 figures/
 checkpoints/*
 !checkpoints/qnet_numpy_full.npz
+!checkpoints/qhybrid_k6144.npz
+!checkpoints/qhybrid_k6144.features.json
 *.pkl
 *.pt
 *.pth
 *.npz
 !checkpoints/qnet_numpy_full.npz
+!checkpoints/qhybrid_k6144.npz
 *.log
 *.resume
 *.lock.tmp

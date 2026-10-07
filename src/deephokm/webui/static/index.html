@@ -22,6 +22,16 @@
         <option value="spectate">Spectate AI vs AI</option>
       </select>
     </div>
+    <div class="row">
+      <label for="difficulty">AI strength</label>
+      <select id="difficulty">
+        <option value="fast" selected>Fast — Q-pure</option>
+        <option value="hard">Hard — Q-hybrid</option>
+      </select>
+    </div>
+    <p id="difficulty-help" class="setup-help">
+      Fast uses direct network inference for quick replies.
+    </p>
     <button id="start">Start game</button>
   </section>
 
@@ -37,6 +47,7 @@
         <div id="trump" class="trump">Trump: —</div>
         <div id="turn" class="turn">—</div>
         <div id="phase" class="phase">—</div>
+        <div id="difficulty-badge" class="difficulty-badge">—</div>
       </div>
       <div class="score" id="score-them">
         <div class="score-title">Opponents</div>

@@ -8,13 +8,16 @@ services:
       context: .
       args:
         QNET_PATH: ${DEEPHOKM_QNET:-checkpoints/qnet_numpy_full.npz}
+        HARD_QNET_PATH: ${DEEPHOKM_HARD_QNET:-checkpoints/qhybrid_k6144.npz}
+        HARD_QNET_CONTRACT_PATH: ${DEEPHOKM_HARD_QNET_CONTRACT:-checkpoints/qhybrid_k6144.features.json}
     image: deephokm-web:latest
     ports:
       - "${DEEPHOKM_PORT}:${DEEPHOKM_PORT}"
     environment:
       DEEPHOKM_PORT: ${DEEPHOKM_PORT}
       DEEPHOKM_QNET: /app/checkpoints/qnet_numpy_full.npz
-      DEEPHOKM_SEARCH_K: ${DEEPHOKM_SEARCH_K:-0}
+      DEEPHOKM_HARD_QNET: /app/checkpoints/qhybrid_k6144.npz
+      DEEPHOKM_HARD_SEARCH_K: ${DEEPHOKM_HARD_SEARCH_K:-384}
       DEEPHOKM_SEARCH_WORKERS: ${DEEPHOKM_SEARCH_WORKERS:-1}
     env_file:
       - .env
@@ -29,6 +32,8 @@ services:
       # weights the image was built from, which makes the mount a no-op
       # rather than a requirement; relative paths resolve against this file.
       - ${DEEPHOKM_MODEL_PATH:-./checkpoints/qnet_numpy_full.npz}:/app/checkpoints/qnet_numpy_full.npz:ro
+      - ${DEEPHOKM_HARD_MODEL_PATH:-./checkpoints/qhybrid_k6144.npz}:/app/checkpoints/qhybrid_k6144.npz:ro
+      - ${DEEPHOKM_HARD_MODEL_CONTRACT_PATH:-./checkpoints/qhybrid_k6144.features.json}:/app/checkpoints/qhybrid_k6144.features.json:ro
     # No GPU device reservation: ServedPolicy always runs inference on CPU
     # (batch-1 calls are faster there than a GPU round-trip; see
     # src/deephokm/webui/serving.py). A mandatory `deploy.resources.

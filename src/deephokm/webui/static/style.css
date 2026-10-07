@@ -72,6 +72,12 @@ main {
 .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
 .row label { font-size: 14px; color: var(--muted); }
 .muted { color: var(--muted); font-size: 12px; }
+.setup-help {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  margin: -4px 0 16px;
+}
 select, input {
   background: var(--bg);
   color: var(--text);
@@ -144,6 +150,13 @@ button.ghost:disabled { color: var(--muted); border-color: var(--panel-edge); }
   margin: 2px 0;
 }
 .phase { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.difficulty-badge {
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
 
 /* ---- table ---- */
 .table {
@@ -283,6 +296,8 @@ footer {
      instead. */
   header { flex-direction: column; align-items: flex-start; gap: 4px; }
   main { padding: 10px; }
+  #setup .row { align-items: stretch; flex-direction: column; }
+  #setup select { width: 100%; min-width: 0; }
   .table { min-height: 280px; grid-template-columns: 1fr; grid-template-rows: auto auto auto auto; }
   .seat-north, .seat-west, .seat-east, .seat-south { grid-column: 1; grid-row: auto; }
   .scorebar { grid-template-columns: 1fr; }

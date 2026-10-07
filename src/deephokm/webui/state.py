@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from deephokm.cards import card_name
 from deephokm.env.hokm_env import HokmEnv
 from deephokm.rules.state import NUM_SEATS
+
+GameDifficulty = Literal["fast", "hard"]
 
 
 @dataclass
@@ -24,6 +26,8 @@ class GameRecord:
     Attributes:
         id: Opaque game identifier.
         mode: ``"human"`` (one human seat) or ``"spectate"`` (all AI).
+        difficulty: ``"fast"`` (Q-pure) or ``"hard"`` (Q-hybrid).
+        policy: Stable identifier for the policy actually serving the game.
         seed: Match seed.
         env: The environment driving the match (learner seat = human seat in
             human mode, seat 0 in spectate mode).
@@ -33,6 +37,8 @@ class GameRecord:
 
     id: str
     mode: str
+    difficulty: GameDifficulty
+    policy: str
     seed: int
     env: HokmEnv
     viewer_seat: int
@@ -73,7 +79,14 @@ class GameStore:
         self._counter = 0
         self._max_games = max_games
 
-    def create(self, mode: str, seed: int, opponents: list[Any]) -> GameRecord:
+    def create(
+        self,
+        mode: str,
+        seed: int,
+        opponents: list[Any],
+        difficulty: GameDifficulty = "fast",
+        policy: str = "random-baseline",
+    ) -> GameRecord:
         """Create a new game and return its record."""
         with self._lock:
             self._counter += 1
@@ -94,6 +107,8 @@ class GameStore:
             record = GameRecord(
                 id=game_id,
                 mode=mode,
+                difficulty=difficulty,
+                policy=policy,
                 seed=seed,
                 env=env,
                 viewer_seat=viewer_seat,
@@ -162,6 +177,8 @@ def public_state(record: GameRecord) -> dict[str, Any]:
     return {
         "game_id": record.id,
         "mode": record.mode,
+        "difficulty": record.difficulty,
+        "policy": record.policy,
         # The seed is deliberately NOT exposed: the engine is deterministic,
         # so a client knowing the seed could reconstruct every private hand.
         "viewer_seat": seat,
