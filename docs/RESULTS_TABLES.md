@@ -1,13 +1,12 @@
 # Result tables
 
-Raw measurements from the earlier phases of the project. The narrative that
-explains them -- what was tried, what failed, and why -- is in
-METHODS_AND_RESULTS.md.
+Raw measurements from the earlier phases of the project. The narrative
+explaining what was tried, what failed, and why is in METHODS_AND_RESULTS.md.
 
 The first full run (5M steps, sparse reward, gamma 0.997) never learned:
 `SubprocVecEnv` workers are forked once at startup, and the opponent pool was
-an in-process Python object living in the training process — the forked
-workers kept the (empty) pool from the moment they were created, so the
+an in-process Python object living in the training process. The forked workers
+kept the (empty) pool from the moment they were created, so the
 entire run was PPO against fixed random opponents rather than self-play, and
 a long-horizon credit-assignment problem was also suspected. The latter
 explanation was incorrect: gamma 0.997 retains about 64% of a reward after
@@ -41,14 +40,14 @@ Against the >= 80% (random) / >= 55% (first snapshot) targets: the first
 snapshot target is met; the random-policy target is not.
 `figures/gauntlet_win_rates.png` shows the full picture: win rate vs. random
 climbs from ~0.58 to a ~0.65-0.81 band by 2M steps and stays there for the
-rest of the run — real early improvement, then noisy fluctuation around a
-plateau that sits mostly below 0.80 rather than a further climb past it. The
+rest of the run. This shows real early improvement followed by noisy
+fluctuation around a plateau that sits mostly below 0.80. The
 0.70 in the table is the literal final round; two nearby rounds against the
 same fully-trained 8M-step policy read 0.78 and 0.81 (`GauntletCallback`
 runs one round on its normal 250k-step cadence and then one more,
 unconditionally, when training ends, so the last two rounds in the log
-evaluate the identical policy on two different 100-game samples) — noise
-around the same plateau, not evidence the target was actually met. Win rate
+evaluate the identical policy on two different 100-game samples). This is
+noise around the same plateau, not evidence the target was actually met. Win rate
 vs. the latest snapshot hovering near 0.50 throughout is expected for
 self-play: the learner and its most recent past self are closely matched by
 construction.
@@ -88,7 +87,7 @@ logged across the full run (`figures/gauntlet_win_rates.png` /
 
 Against the >= 80% (random) / >= 55% (first snapshot) targets: the first
 snapshot target is met on average; the random-policy target is not, and the
-run never approached it — win rate vs. random oscillates in a 0.50-0.70
+run never approached it. Win rate vs. random oscillates in a 0.50-0.70
 band for the entire 8M steps with no visible upward trend past the first
 250k-step evaluation, a materially lower ceiling than the earlier run's
 0.65-0.81 plateau. Win rate vs. greedy (mean 0.13, range 0.06-0.24) is
@@ -98,11 +97,11 @@ stall seen at 25%, but did not produce the hoped-for improvement against it
 either. Correcting the mathematically-backwards gamma and replacing
 trick-level shaping with hand-level shaping did not, on this evidence,
 raise the ceiling on win rate against either a random or a disciplined
-opponent — it produced a run that trains stably (no stall, no collapse)
+opponent. It produced a run that trains stably (no stall, no collapse)
 but plateaus at a similar level to the run it replaced. RL from a
 from-scratch random initialization may simply need far more than 8M steps,
 or a materially different self-play curriculum, to discover disciplined
-play on its own — see *Training* for the behavioral-cloning warm start
+play on its own. See *Training* for the behavioral-cloning warm start
 built to test that directly (a supervised fit to `GreedyPolicy` before any
 RL, rather than more self-play tuning); its own run and results are not yet
 recorded here.

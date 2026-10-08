@@ -56,8 +56,7 @@ def _check_hand_completion(
     engine swapped in the next deal.
     """
     assert len(hand_cards) == 4 * sum(final_tally), (
-        f"seed {seed}: hand ended with {len(hand_cards)} cards played "
-        f"for tally {final_tally}"
+        f"seed {seed}: hand ended with {len(hand_cards)} cards played for tally {final_tally}"
     )
     assert TRICKS_TO_WIN_HAND <= sum(final_tally) <= TRICKS_PER_HAND
     assert max(final_tally) >= TRICKS_TO_WIN_HAND

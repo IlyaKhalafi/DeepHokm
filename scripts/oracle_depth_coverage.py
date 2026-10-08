@@ -74,13 +74,17 @@ def main(argv: list[str] | None = None) -> None:
         args.n_hands, controlled_team=args.controlled_team, base_seed=args.seed
     )
     print(f"hands checked: {len(counts)}")
-    print(f"real (non-forced) team-{args.controlled_team} decisions per hand: "
-          f"mean={statistics.mean(counts):.2f}, median={statistics.median(counts)}, "
-          f"min={min(counts)}, max={max(counts)}")
+    print(
+        f"real (non-forced) team-{args.controlled_team} decisions per hand: "
+        f"mean={statistics.mean(counts):.2f}, median={statistics.median(counts)}, "
+        f"min={min(counts)}, max={max(counts)}"
+    )
     for d in (2, 3, 4, 6, 8, 10):
         covered = sum(1 for c in counts if c <= d)
-        print(f"  depth={d} fully covers the hand's real decisions in "
-              f"{covered}/{len(counts)} = {covered / len(counts):.3f} of hands")
+        print(
+            f"  depth={d} fully covers the hand's real decisions in "
+            f"{covered}/{len(counts)} = {covered / len(counts):.3f} of hands"
+        )
 
 
 if __name__ == "__main__":

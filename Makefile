@@ -71,7 +71,8 @@ help:  ## Show available targets
 test:  ## Run the full pytest suite
 	uv run pytest
 
-lint:  ## Run ruff lint and the mypy type check
+lint:  ## Check formatting, lint, and static types
+	uv run ruff format --check .
 	uv run ruff check .
 	uv run mypy src
 

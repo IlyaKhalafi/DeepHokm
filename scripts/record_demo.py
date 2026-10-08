@@ -141,13 +141,20 @@ def _assemble_gif(frames_dir: str) -> None:
     OUT.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         [
-            "ffmpeg", "-y", "-framerate", str(FPS),
-            "-i", f"{frames_dir}/f%03d.png",
-            "-vf", (
+            "ffmpeg",
+            "-y",
+            "-framerate",
+            str(FPS),
+            "-i",
+            f"{frames_dir}/f%03d.png",
+            "-vf",
+            (
                 "split[s0][s1];[s0]palettegen=max_colors=128[p];"
                 "[s1][p]paletteuse=dither=bayer:bayer_scale=3"
             ),
-            "-loop", "0", str(OUT),
+            "-loop",
+            "0",
+            str(OUT),
         ],
         check=True,
         capture_output=True,

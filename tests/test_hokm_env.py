@@ -677,9 +677,7 @@ def test_hand_only_episode_ends_after_the_first_hand() -> None:
     undecided is the signature of the curriculum knob working, not a
     coincidental early match win.
     """
-    env = HokmEnv(
-        seat=0, opponents=random_opponents(11), hand_only=True, hand_reward=1.0
-    )
+    env = HokmEnv(seat=0, opponents=random_opponents(11), hand_only=True, hand_reward=1.0)
     obs, info = env.reset(seed=11)
     steps = 0
     done = False
@@ -764,9 +762,7 @@ def test_hand_only_reward_matches_hand_outcome_not_match_outcome() -> None:
     never accidentally the sparse +/-1 match reward (which cannot have fired
     yet -- match_complete implies hand_complete, but a single hand practically
     never decides a 7-point match)."""
-    env = HokmEnv(
-        seat=2, opponents=random_opponents(13), hand_only=True, hand_reward=0.37
-    )
+    env = HokmEnv(seat=2, opponents=random_opponents(13), hand_only=True, hand_reward=0.37)
     obs, info = env.reset(seed=13)
     done = False
     while not done:

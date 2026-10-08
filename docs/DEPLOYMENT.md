@@ -14,9 +14,10 @@ for each game. Startup validates the Hard archive against its feature contract,
 including the recorded training K and weight hash, instead of silently reusing
 the Fast model.
 `DEEPHOKM_HARD_SEARCH_K` (default `384`) controls the Hard-mode search budget;
-Fast never runs search. Higher Hard budgets trade latency for strength (3072
-was measured at seconds per decision -- `DEEPHOKM_SEARCH_WORKERS` parallelizes
-the rollouts to keep large budgets interactive). The training K=6144 is a
+Fast never runs search. Higher Hard budgets trade latency for strength. A
+budget of 3072 was measured at seconds per decision, while
+`DEEPHOKM_SEARCH_WORKERS` parallelizes the rollouts to keep large budgets
+interactive. The training K=6144 is a
 separate, offline, one-time cost that never runs at serve time regardless of
 the live search setting.
 
@@ -67,8 +68,8 @@ docker compose up --build -d
 curl -fs "http://localhost:${DEEPHOKM_PORT}/health"
 ```
 
-or plain docker (export the configuration first — `--env-file` only feeds the
-container's environment, not the shell expansions in these flags):
+or plain docker. Export the configuration first because `--env-file` only
+feeds the container environment, not the shell expansions in these flags:
 
 ```bash
 set -a; . ./.env; set +a
@@ -108,6 +109,6 @@ served app only falls back to it if the numpy weights are absent.
 ## Configuration
 
 All deployment-specific values are environment variables documented in
-[`.env.example`](.env.example) — GPU device id, web UI port, served model
-paths, and the visual QA reviewer endpoint. Defaults live only there;
+[`.env.example`](../.env.example). These include the GPU device id, web UI
+port, served model paths, and the visual QA reviewer endpoint. Defaults live only there;
 per-machine values live in a gitignored `.env`.

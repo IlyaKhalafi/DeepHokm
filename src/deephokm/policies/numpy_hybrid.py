@@ -73,12 +73,8 @@ def _score_pair(
     engine_bytes, seat, team, candidate, baseline, world, seed = task
     engine = pickle.loads(engine_bytes)
     clone_rng = random.Random(seed)
-    value_c = _action_value(
-        engine, seat, candidate, team=team, world=world, rng=clone_rng
-    )
-    value_b = _action_value(
-        engine, seat, baseline, team=team, world=world, rng=clone_rng
-    )
+    value_c = _action_value(engine, seat, candidate, team=team, world=world, rng=clone_rng)
+    value_b = _action_value(engine, seat, baseline, team=team, world=world, rng=clone_rng)
     return value_c, value_b
 
 
@@ -251,13 +247,21 @@ class NumpyHybridPolicy:
         baseline = self.greedy.act(observation, mask)
         if self.eliminate:
             return self._decide_by_elimination(
-                engine, seat, observation=observation, mask=mask,
-                legal=legal, baseline=baseline,
+                engine,
+                seat,
+                observation=observation,
+                mask=mask,
+                legal=legal,
+                baseline=baseline,
             )
         if self.allocate:
             return self._decide_by_allocation(
-                engine, seat, observation=observation, mask=mask,
-                legal=legal, baseline=baseline,
+                engine,
+                seat,
+                observation=observation,
+                mask=mask,
+                legal=legal,
+                baseline=baseline,
             )
         for candidate in self._proposals(observation, mask, legal, baseline):
             if self._beats(engine, seat, candidate, baseline):
@@ -386,7 +390,6 @@ class NumpyHybridPolicy:
         discordant = wins_candidate + wins_baseline
         return _sign_test_p_value(wins_candidate, discordant) <= self.max_p_value
 
-
     def _decide_by_elimination(
         self,
         engine: HokmEngine,
@@ -459,9 +462,7 @@ class NumpyHybridPolicy:
                     (engine_bytes, seat, team, world, list(survivors), seed_base + i)
                     for i, world in enumerate(worlds)
                 ]
-                for values in self._scorer_pool().map(
-                    _score_batch, tasks, chunksize=1
-                ):
+                for values in self._scorer_pool().map(_score_batch, tasks, chunksize=1):
                     for action, value in zip(survivors, values, strict=True):
                         totals[action] += value
                         squares[action] += value * value
@@ -470,7 +471,11 @@ class NumpyHybridPolicy:
                 for world in worlds:
                     for action in survivors:
                         value = self._value(
-                            engine, seat, action, team=team, world=world,
+                            engine,
+                            seat,
+                            action,
+                            team=team,
+                            world=world,
                             clone_rng=clone_rng,
                         )
                         totals[action] += value

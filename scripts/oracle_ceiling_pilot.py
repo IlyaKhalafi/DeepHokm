@@ -81,11 +81,15 @@ def summarize(results: list[OracleCeilingResult]) -> None:
     n = len(results)
     improved = [r for r in results if r.improved]
     print(f"decisions checked: {n} (depth={results[0].depth if results else '-'})")
-    print(f"decisions where the oracle forces a strictly better outcome: "
-          f"{len(improved)} ({len(improved) / n:.1%})")
+    print(
+        f"decisions where the oracle forces a strictly better outcome: "
+        f"{len(improved)} ({len(improved) / n:.1%})"
+    )
     if improved:
-        print(f"  (of which, actual outcome was a loss the oracle turns into a win: "
-              f"{sum(1 for r in improved if r.actual_outcome < 0)})")
+        print(
+            f"  (of which, actual outcome was a loss the oracle turns into a win: "
+            f"{sum(1 for r in improved if r.actual_outcome < 0)})"
+        )
 
 
 def _positive_int(raw: str) -> int:

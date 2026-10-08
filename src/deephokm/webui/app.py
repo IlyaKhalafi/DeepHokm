@@ -118,11 +118,11 @@ def get_served() -> SearchServedPolicy | ServedPolicy | GreedyPolicy | None:
     heuristic directly, without loading network weights. Otherwise the numpy
     action-value network with optional search remains the default.
 
-    The numpy action-value network with search is preferred: it is the
-    strongest measured policy here (0.841 against a greedy opposing team),
-    while the reinforcement-learning checkpoint plateaued at the level of a
-    greedy clone. The checkpoint is kept as a fallback so an existing
-    deployment configured with DEEPHOKM_MODEL keeps working.
+    The NumPy action-value path is preferred because it is the actively
+    evaluated and shipped policy. The reinforcement-learning checkpoint is
+    retained only as a compatibility fallback for deployments configured with
+    DEEPHOKM_MODEL. Benchmark claims live in the results documentation rather
+    than in serving code.
     """
     with _model_lock:
         if (

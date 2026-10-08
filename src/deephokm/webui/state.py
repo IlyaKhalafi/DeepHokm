@@ -190,9 +190,7 @@ def public_state(record: GameRecord) -> dict[str, Any]:
         "table": table,
         # The trick that just finished, shown while the table is empty so the
         # winning play does not vanish the instant it resolves.
-        "last_trick": [
-            {"seat": s, "card": c, "name": card_name(c)} for s, c in record.last_trick
-        ],
+        "last_trick": [{"seat": s, "card": c, "name": card_name(c)} for s, c in record.last_trick],
         "last_trick_winner": record.last_trick_winner,
         "tricks_won": list(hands.tricks_won),
         "game_points": list(engine.state.game_points),

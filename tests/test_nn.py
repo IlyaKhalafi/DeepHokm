@@ -274,9 +274,7 @@ def test_tokenizer_layout_is_fixed() -> None:
         hand = sorted(int(c) for c in np.flatnonzero(state["hand"]))
         assert tokens[: len(hand)] == hand
         n_played = len(_played_cards(state))
-        assert tokens[NUM_HAND_SLOTS + n_played : hist_start] == [52] * (
-            NUM_TRICK_SLOTS - n_played
-        )
+        assert tokens[NUM_HAND_SLOTS + n_played : hist_start] == [52] * (NUM_TRICK_SLOTS - n_played)
         history = [int(c) for c in state["history"] if c >= 0]
         assert tokens[hist_start : hist_start + len(history)] == history
         # Context slots always present.
@@ -338,8 +336,17 @@ def test_full_trick_tokenizers_agree_on_zero_tokens() -> None:
     assert single.tokens[0, 13:17].tolist() == [52] * 4
     batch = {k: th.tensor(np.stack([v])) for k, v in obs.items()}
     vectorized = tokenize_tensor_batch(batch)
-    for field in ("tokens", "is_card", "ranks", "is_trump", "suit_slots",
-                  "type_ids", "positions", "roles", "padding_mask"):
+    for field in (
+        "tokens",
+        "is_card",
+        "ranks",
+        "is_trump",
+        "suit_slots",
+        "type_ids",
+        "positions",
+        "roles",
+        "padding_mask",
+    ):
         assert th.equal(getattr(single, field)[0], getattr(vectorized, field)[0]), (
             f"{field} mismatch"
         )

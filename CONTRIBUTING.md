@@ -17,7 +17,7 @@ Keep game-rule changes in `src/deephokm/rules`, policies in
 Tests should cover legal actions, partnership behavior, suit symmetry, hand
 resets, and independence from opponents' actual hidden cards where applicable.
 
-The reusable Q-network workflow is documented in [Training](TRAINING.md).
+The reusable Q-network workflow is documented in [Training](docs/TRAINING.md).
 Use small CPU runs for smoke tests; do not start expensive training or overwrite
 the bundled weights as part of a normal test run.
 

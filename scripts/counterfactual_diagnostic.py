@@ -124,10 +124,14 @@ def summarize(records: list[DecisionRecord]) -> None:
     max_adv = max(advantages)
 
     print(f"decisions searched: {n}")
-    print(f"switched from GreedyPolicy's action (p-value <= max_p_value): "
-          f"{len(switched)} ({len(switched) / n:.1%})")
-    print(f"decisions with ANY positive raw advantage (before threshold): "
-          f"{len(positive_raw)} ({len(positive_raw) / n:.1%})")
+    print(
+        f"switched from GreedyPolicy's action (p-value <= max_p_value): "
+        f"{len(switched)} ({len(switched) / n:.1%})"
+    )
+    print(
+        f"decisions with ANY positive raw advantage (before threshold): "
+        f"{len(positive_raw)} ({len(positive_raw) / n:.1%})"
+    )
     print(f"mean raw advantage: {mean_adv:+.4f}")
     print(f"max raw advantage: {max_adv:+.4f}")
     if switched:

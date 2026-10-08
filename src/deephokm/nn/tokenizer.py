@@ -319,9 +319,7 @@ def _canonical_suit_slots(
     is_trump_suit = declared & (
         th.arange(NUM_SUITS, device=device).view(1, -1) == trump.argmax(dim=1, keepdim=True)
     )
-    key = (
-        (is_trump_suit.to(th.int64) << 39) | (hand_sig << 26) | (seen_sig << 13) | trick_sig
-    )
+    key = (is_trump_suit.to(th.int64) << 39) | (hand_sig << 26) | (seen_sig << 13) | trick_sig
     # Descending on the key; ties fall to the lower suit id. Shifting the key
     # left by two and subtracting the suit id folds both into one sort value.
     sort_value = (key << 2) - th.arange(NUM_SUITS, device=device).view(1, -1)

@@ -1,11 +1,10 @@
-"""Serve the strongest measured policy to the web UI.
+"""Serve the NumPy action-value policies to the web UI.
 
 The UI previously served a ``MaskablePPO`` checkpoint, which is the approach
 that plateaued at the level of a greedy clone, and fell back to random play when
-no checkpoint was present. This serves what actually measures well: the numpy
-action-value network nominating and ordering, with the determinized search
-confirming, which reaches 0.841 against a greedy opposing team at high search
-budgets.
+no checkpoint was present. The primary path now serves the action-value network
+directly or combines it with determinized search. Measured results and their
+evaluation caveats are kept in ``docs/METHODS_AND_RESULTS.md``.
 
 Search strength is a latency trade. The web UI exposes both ends directly:
 ``fast`` runs the compact network alone, while ``hard`` uses the separate

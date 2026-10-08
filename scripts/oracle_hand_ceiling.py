@@ -92,14 +92,18 @@ def _report(label: str, rows: list[tuple[float, float, bool]]) -> None:
     actual_wins = sum(1 for a, _, _ in rows if a > 0)
     oracle_wins = sum(1 for _, b, _ in rows if b > 0)
     flipped = sum(1 for a, b, _ in rows if b > a)
-    print(f"  {label} (n={n}): actual {actual_wins}/{n} = {actual_wins / n:.3f}, "
-          f"oracle {oracle_wins}/{n} = {oracle_wins / n:.3f}, "
-          f"flipped {flipped}/{n} = {flipped / n:.3f}")
+    print(
+        f"  {label} (n={n}): actual {actual_wins}/{n} = {actual_wins / n:.3f}, "
+        f"oracle {oracle_wins}/{n} = {oracle_wins / n:.3f}, "
+        f"flipped {flipped}/{n} = {flipped / n:.3f}"
+    )
 
 
 def summarize(results: list[tuple[float, float, bool]], depth: int) -> None:
-    print(f"hands checked: {len(results)} (depth={depth}, team 0 fixed, "
-          f"from right after each hand's trump call)")
+    print(
+        f"hands checked: {len(results)} (depth={depth}, team 0 fixed, "
+        f"from right after each hand's trump call)"
+    )
     _report("overall", results)
     _report("team 0 IS hakem", [r for r in results if r[2]])
     _report("team 0 is NOT hakem", [r for r in results if not r[2]])
