@@ -186,6 +186,11 @@ def test_index_serves_html(client: TestClient) -> None:
     assert "DeepHokm" in response.text
     assert 'option value="fast"' in response.text
     assert 'option value="hard"' in response.text
+    assert "Fast — Q-pure" not in response.text
+    assert "Hard — Q-hybrid" not in response.text
+    assert ">Ready</div>" not in response.text
+    assert "Fast plays faster but is less competitive" in response.text
+    assert "Hard makes decisions slower" in response.text
     assert "text/html" in response.headers["content-type"]
 
 

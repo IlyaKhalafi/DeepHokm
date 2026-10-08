@@ -5,8 +5,8 @@ const SUITS = ["♣", "♦", "♥", "♠"]; // clubs, diamonds, hearts, spades
 const SUIT_NAMES = ["Clubs", "Diamonds", "Hearts", "Spades"];
 const RED_SUITS = new Set([1, 2]);
 const POLICY_LABELS = {
-  "numpy-qnet-only": "Fast Q-pure",
-  "numpy-qnet+elimination-search": "Hard Q-hybrid",
+  "numpy-qnet-only": "Fast",
+  "numpy-qnet+elimination-search": "Hard",
   "maskable-ppo": "MaskablePPO fallback",
   "greedy-baseline": "Greedy baseline",
   "random-baseline": "Random baseline",
@@ -28,7 +28,7 @@ function setStatus(text, isError = false) {
 
 function policyLabel(gameState) {
   return POLICY_LABELS[gameState.policy]
-    || (gameState.difficulty === "hard" ? "Hard Q-hybrid" : "Fast Q-pure");
+    || (gameState.difficulty === "hard" ? "Hard" : "Fast");
 }
 
 function updateStatusFromState() {
@@ -433,13 +433,6 @@ function stopAuto() {
   $("auto").textContent = "Auto-play";
 }
 
-function updateDifficultyHelp() {
-  const hard = $("difficulty").value === "hard";
-  $("difficulty-help").textContent = hard
-    ? "Hard uses the K=6144-trained Q-hybrid network plus live search."
-    : "Fast uses direct network inference for quick replies.";
-}
-
 function toggleAuto() {
   if (autoTimer) {
     stopAuto();
@@ -475,13 +468,11 @@ window.__deephokmRender = (externalState) => {
 
 document.addEventListener("DOMContentLoaded", () => {
   $("start").addEventListener("click", startGame);
-  $("difficulty").addEventListener("change", updateDifficultyHelp);
-  updateDifficultyHelp();
   $("newgame").addEventListener("click", () => {
     stopAuto();
     $("game").classList.add("hidden");
     $("setup").classList.remove("hidden");
-    setStatus("Ready");
+    setStatus("");
   });
   $("step").addEventListener("click", spectateStep);
   $("auto").addEventListener("click", toggleAuto);
@@ -506,9 +497,7 @@ async function showEngine() {
       return;
     }
     if (info.modes) {
-      const hard = info.modes.hard;
-      const worlds = hard.search_k === 1 ? "world" : "worlds";
-      el.textContent = `engines: Fast Q-pure · Hard Q-hybrid (trained K=${hard.training_k}, live ${hard.search_k} ${worlds})`;
+      el.textContent = "AI strength: Fast · Hard";
       return;
     }
     const k = info.search_k ? `${info.search_k} sampled worlds/decision` : "";

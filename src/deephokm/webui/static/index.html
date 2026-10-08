@@ -9,7 +9,7 @@
 <body>
 <header>
   <h1>Deep<span class="accent">Hokm</span></h1>
-  <div id="status" class="status">Ready</div>
+  <div id="status" class="status" aria-live="polite"></div>
 </header>
 
 <main>
@@ -25,12 +25,13 @@
     <div class="row">
       <label for="difficulty">AI strength</label>
       <select id="difficulty">
-        <option value="fast" selected>Fast — Q-pure</option>
-        <option value="hard">Hard — Q-hybrid</option>
+        <option value="fast" selected>Fast</option>
+        <option value="hard">Hard</option>
       </select>
     </div>
     <p id="difficulty-help" class="setup-help">
-      Fast uses direct network inference for quick replies.
+      Fast plays faster but is less competitive. Hard makes decisions slower
+      but is more competitive.
     </p>
     <button id="start">Start game</button>
   </section>

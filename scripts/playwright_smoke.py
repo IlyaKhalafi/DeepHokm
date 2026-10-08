@@ -55,7 +55,7 @@ def main() -> int:
         assert page.locator("#points-us").inner_text() == "0"
         assert page.locator("#trump").inner_text() != ""
         assert page.locator("#turn").inner_text() != ""
-        assert page.locator("#difficulty-badge").inner_text() == "FAST Q-PURE"
+        assert page.locator("#difficulty-badge").inner_text() == "FAST"
 
         # Screenshot for the record.
         os.makedirs("logs/visual_qa", exist_ok=True)
@@ -70,7 +70,7 @@ def main() -> int:
         spectate.click("#start")
         spectate.wait_for_selector("#game:not(.hidden)", timeout=120_000)
         assert spectate.locator("#hand .card").count() == 0, "spectator saw a hand"
-        assert spectate.locator("#difficulty-badge").inner_text() == "HARD Q-HYBRID"
+        assert spectate.locator("#difficulty-badge").inner_text() == "HARD"
         spectate.click("#step")
         spectate.wait_for_timeout(300)
         spectate.screenshot(path="logs/visual_qa/smoke_spectate.png", full_page=True)
