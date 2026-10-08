@@ -34,6 +34,10 @@ def main() -> int:
 
         # Start a human-vs-model game on the low-latency path.
         page.select_option("#mode", "human")
+        page.click("#difficulty")
+        page.keyboard.press("ArrowDown")
+        page.keyboard.press("Enter")
+        assert page.locator("#difficulty").input_value() == "hard"
         page.select_option("#difficulty", "fast")
         page.click("#start")
         page.wait_for_selector("#game:not(.hidden)", timeout=10_000)

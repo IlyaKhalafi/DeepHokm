@@ -91,6 +91,20 @@ select, input {
   min-width: 15rem;
   max-width: 100%;
 }
+select {
+  appearance: none;
+  color-scheme: dark;
+  cursor: pointer;
+  padding-right: 2.75rem;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2210%22 height=%226%22 viewBox=%220 0 10 6%22%3E%3Cpath d=%22M1 1l4 4 4-4%22 fill=%22none%22 stroke=%22%23a3b1bf%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22 stroke-width=%221.5%22/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  background-size: 10px 6px;
+}
+select option {
+  background-color: var(--bg);
+  color: var(--text);
+}
 button {
   background: var(--accent);
   color: #08281c;
