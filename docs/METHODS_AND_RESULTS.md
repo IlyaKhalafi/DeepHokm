@@ -23,6 +23,33 @@ actual hidden hands cannot change the public network inputs.
 | Pure Q-net | Highest-scoring legal action; greedy trump declaration | NumPy-only inference |
 | Q-hybrid | Network ordering plus determinized search | More compute than pure inference |
 
+### K notation: training versus live search
+
+This project uses K for a count of sampled determinized worlds, but K appears
+at two separate stages:
+
+- **Teacher K=6144** is an offline data-generation budget. For every recorded
+  decision, the teacher samples worlds to estimate legal-action values. Those
+  estimates become training labels. This cost ends when the dataset is built.
+- **Verification K=384** is the default online Q-hybrid budget. At each
+  non-forced decision, sequential elimination samples fresh worlds, scores the
+  surviving legal actions in the same worlds, and removes actions only when
+  the paired evidence puts them sufficiently behind.
+
+In the current six-round elimination implementation, K=384 means up to 64 new
+shared worlds per round, or 384 shared worlds across elimination when all six
+rounds run. If the best survivor differs from greedy, a separate K=384 paired
+sign test verifies that final choice. Each world may therefore execute several
+rollouts, one for every surviving action; K is a sampling budget, not the total
+number of simulated action rollouts or a latency in milliseconds.
+
+A network trained from K=6144 teacher labels can be served without live search,
+but that is Q-pure inference, not Q-hybrid. Q-hybrid is the trained network plus
+the online verification stage. Raising the online K spends more time on the
+current move; it does not improve or retrain the stored weights. The deployment
+controls and latency measurements are documented in
+[Deployment](DEPLOYMENT.md#two-different-k-values).
+
 The greedy policy conserves winning cards when it cannot win a trick, avoids
 unnecessary partner overcalls, remembers proved suit voids, and handles
 position-specific tactics. In third hand, it considers whether the fourth
@@ -100,15 +127,22 @@ validation-selected checkpoints; neither is an untouched final-test result.
 Expanded-data strength retraining reached 70.49% decisive validation agreement.
 It does not replace the bundled model automatically.
 
-A separate paired match benchmark of the context model against the updated
-greedy policy yielded 69/100 wins for pure inference and 86/100 for Q-hybrid.
-Its median decision costs were about 11 ms and 2.43 seconds respectively.
-Deals were played on both team sides; the paired bootstrap intervals were
-[58%, 80%] and [78%, 93%]. These are separate development measurements, not
-updates to the shipped-model table.
+A separate paired match benchmark tested the same K=6144-trained context
+weights in both serving configurations against the updated greedy policy:
 
-No completed K=6144 head-to-head evaluation establishes superiority over legal
-search. Partial runs are not used to claim a final win rate.
+| Serving configuration | Online K | Wins | Matches | Median | p95 |
+|---|---:|---:|---:|---:|---:|
+| Q-pure | 0 | 69 | 100 | 11 ms | 20 ms |
+| Q-hybrid | 384 | 86 | 100 | 2.43 s | 8.05 s |
+
+Deals were played on both team sides; the paired bootstrap intervals were
+[58%, 80%] and [78%, 93%]. These are development measurements, not updates to
+the shipped-model table. The comparison isolates the online verification
+stage: both rows use the same weights trained from teacher K=6144 labels.
+
+No completed head-to-head evaluation establishes that the K=6144-trained
+student is superior to legal search. Partial runs are not used to claim a final
+win rate.
 
 ## What did not work
 

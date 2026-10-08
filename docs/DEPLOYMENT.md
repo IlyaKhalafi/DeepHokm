@@ -20,6 +20,34 @@ the rollouts to keep large budgets interactive). The training K=6144 is a
 separate, offline, one-time cost that never runs at serve time regardless of
 the live search setting.
 
+### Two different K values
+
+The two K values belong to different stages and must not be compared as if
+they were one setting:
+
+| Name | Value | When it runs | What it controls |
+|---|---:|---|---|
+| Teacher K | 6144 | Offline, while generating training data | Determinized worlds used to estimate each legal action value and create the labels that train the Hard network |
+| Verification K | 384 by default | Online, for every non-forced Hard decision | Sample budget used by sequential elimination and its final paired sign test |
+
+Teacher K=6144 is paid once during data generation. Loading weights trained
+from those labels does not replay 6144 worlds during inference. Conversely,
+the online K=384 search does not retrain or modify the network; it evaluates
+the current decision. Setting online K to zero removes that search and makes
+the policy Q-pure, even if its weights were trained from K=6144 labels.
+Verification K is not the total number of rollout executions: one sampled
+world can score several surviving actions, and accepting a non-greedy survivor
+uses a separate paired sign test at the same K.
+
+For the bundled K=6144-trained context model, the paired development benchmark
+measured 69 wins in 100 matches against greedy at about 11 ms median per
+non-forced decision with Q-pure inference. The same weights with Q-hybrid
+online verification K=384 measured 86 wins in 100 matches at about 2.43 s
+median and 8.05 s p95. Thus, in this repository, **Q-hybrid** means the
+composition of a Q-network and live determinized search; it is not a name for
+the weight archive alone. See [Methods and results](METHODS_AND_RESULTS.md) for
+the evaluation caveats.
+
 ```bash
 make webui            # serves on ${DEEPHOKM_PORT}
 ```
