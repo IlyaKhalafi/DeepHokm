@@ -13,12 +13,22 @@ const POLICY_LABELS = {
 };
 
 const AUTO_PLAY_MS = 900;
+// The game lives on the server; only its id is kept here, so a reload can
+// pick the same game back up instead of dropping to the setup screen.
+const SAVED_GAME_KEY = "deephokm.gameId";
 
 let gameId = null;
 let state = null;
 let autoTimer = null;
 
 const $ = (id) => document.getElementById(id);
+
+function rememberGame(id) {
+  try {
+    if (id) localStorage.setItem(SAVED_GAME_KEY, id);
+    else localStorage.removeItem(SAVED_GAME_KEY);
+  } catch (_) { /* storage blocked: the game still plays, it just won't resume */ }
+}
 
 function setStatus(text, isError = false) {
   const el = $("status");
@@ -406,6 +416,7 @@ async function startGame() {
   try {
     state = await api("/api/games", { method: "POST", body: JSON.stringify(body) });
     gameId = state.game_id;
+    rememberGame(gameId);
     $("setup").classList.add("hidden");
     $("game").classList.remove("hidden");
     const strength = policyLabel(state);
@@ -413,6 +424,32 @@ async function startGame() {
       ? `You play seat 0; ${strength} plays the rest.`
       : `Spectating ${strength} vs ${strength}.`);
     render();
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+}
+
+async function resumeGame() {
+  let saved = null;
+  try {
+    saved = localStorage.getItem(SAVED_GAME_KEY);
+  } catch (_) { /* storage blocked */ }
+  if (!saved) return;
+  try {
+    state = await api(`/api/games/${saved}`);
+  } catch (_) {
+    // Games are held in server memory: evicted, or lost to a restart.
+    rememberGame(null);
+    return;
+  }
+  gameId = saved;
+  $("setup").classList.add("hidden");
+  $("game").classList.remove("hidden");
+  render();
+  if (state.mode !== "human") return;
+  try {
+    // A reload can land mid-trick, with the AI seats still owing replies.
+    await advanceUntilMyTurn();
   } catch (err) {
     setStatus(err.message, true);
   }
@@ -470,6 +507,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("start").addEventListener("click", startGame);
   $("newgame").addEventListener("click", () => {
     stopAuto();
+    rememberGame(null);
     $("game").classList.add("hidden");
     $("setup").classList.remove("hidden");
     setStatus("");
@@ -479,6 +517,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll(".trump-btn").forEach((btn) => {
     btn.addEventListener("click", () => playAction(52 + parseInt(btn.dataset.suit, 10)));
   });
+  resumeGame();
 });
 
 

@@ -32,7 +32,7 @@ from pathlib import Path
 
 import numpy as np
 
-from deephokm.cards import NUM_CARDS
+from deephokm.cards import NUM_CARDS, NUM_RANKS
 from deephokm.env.spaces import Observation, mask_for, observation_for
 from deephokm.nn.feature_contract import resolve_feature_mode
 from deephokm.nn.features import build_features
@@ -46,7 +46,7 @@ from deephokm.policies.search import (
     sample_determinized_hands,
 )
 from deephokm.rules.engine import HokmEngine
-from deephokm.rules.state import NUM_SEATS, Phase, team_of
+from deephokm.rules.state import NUM_SEATS, HandState, Phase, team_of
 
 DEFAULT_VERIFY_SAMPLES = 192
 DEFAULT_MAX_P_VALUE = 0.05
@@ -60,6 +60,44 @@ MIN_DRAWS_TO_ELIMINATE = 2  # a variance estimate needs at least two samples
 # Every legal action keeps at least this share of the mean per-action budget,
 # so a confident-but-wrong network can never starve the right move entirely.
 MIN_BUDGET_SHARE = 0.25
+
+
+def _distinct_plays(hands: HandState, seat: int, ranked: list[int], baseline: int) -> list[int]:
+    """Drop cards that are the same play as one already kept, in ``ranked`` order.
+
+    Two cards of one suit in ``seat``'s hand are interchangeable when every
+    rank between them is either in that same hand or already gone in a
+    completed trick: no other seat can ever play a card that separates them,
+    and Hokm scores tricks rather than cards, so both win and lose exactly the
+    same tricks in every world. Scoring both spends rollouts measuring a
+    difference that is zero by construction.
+
+    Cards in the *current* trick do not count as gone. A 7 and a 9 around an
+    8 lying on the table are different plays: one loses to it, one beats it.
+
+    A run containing ``baseline`` is represented by ``baseline`` itself, so
+    the accept gate still compares against the card greedy would really play;
+    any other run is represented by its first card in ``ranked``.
+    """
+    completed = len(hands.played) - len(hands.current_trick)
+    gone = set(hands.played[:completed])
+    gone.update(hands.hands[seat])
+
+    run_of: dict[int, int] = {}
+    run = previous = -1
+    for card in sorted(ranked):
+        touching = (
+            previous >= 0
+            and card // NUM_RANKS == previous // NUM_RANKS
+            and all(between in gone for between in range(previous + 1, card))
+        )
+        if not touching:
+            run = card
+        run_of[card] = run
+        previous = card
+
+    chosen = {run_of[baseline]: baseline} if baseline in run_of else {}
+    return [card for card in ranked if chosen.setdefault(run_of[card], card) == card]
 
 
 def _score_pair(
@@ -419,15 +457,22 @@ class NumpyHybridPolicy:
         Greedy's action is never eliminated, and is returned unless a survivor
         beats it on the same sign test the pure search uses, so the accept gate
         is unchanged.
+
+        Interchangeable cards (see :func:`_distinct_plays`) enter the field
+        once. That is not pruning: the cards merged away are the same play as
+        one that is scored, so nothing the search could have chosen is lost.
         """
         planes, scalars = build_features(observation, mask, feature_mode=self.feature_mode)
         values = self.net(planes[None], scalars[None])[0]
-        survivors = sorted(legal, key=lambda a: -values[a])
+        hands = engine.state.hands
+        survivors = _distinct_plays(hands, seat, sorted(legal, key=lambda a: -values[a]), baseline)
         if baseline not in survivors:  # defensive: greedy must stay in the field
             survivors.append(baseline)
+        if len(survivors) == 1:
+            # Every legal card is the same play; there is nothing to search.
+            return survivors[0]
 
         team = team_of(seat)
-        hands = engine.state.hands
         own_hand = hands.hands[seat]
         seen = set(hands.played) | set(own_hand)
         unseen = [card for card in range(NUM_CARDS) if card not in seen]

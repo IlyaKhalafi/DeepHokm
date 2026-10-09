@@ -19,9 +19,9 @@ from deephokm.nn.features import PLANE_HAND, PLANE_SEEN, build_features
 from deephokm.nn.numpy_qnet import save_weights
 from deephokm.nn.rank_cnn import RankCNN, export_weights
 from deephokm.policies.greedy_policy import GreedyPolicy
-from deephokm.policies.numpy_hybrid import NumpyHybridPolicy
+from deephokm.policies.numpy_hybrid import NumpyHybridPolicy, _distinct_plays
 from deephokm.rules.engine import HokmEngine
-from deephokm.rules.state import NUM_SEATS, Phase
+from deephokm.rules.state import NUM_SEATS, HandState, Phase
 
 # Tiny network and sample count: these tests check legality and wiring, and a
 # realistic verify_samples would make them minutes long for no extra coverage.
@@ -183,6 +183,39 @@ def test_allocation_mode_plays_a_full_match_legally() -> None:
     weights = export_weights(RankCNN(channels=TEST_CHANNELS).eval())
     policy = NumpyHybridPolicy(weights, verify_samples=2, allocate=True, seed=0)
     assert len(play_match(policy, seed=29)) > 13
+
+
+def test_interchangeable_cards_enter_the_search_once() -> None:
+    """Touching cards are one play; greedy's card stands for its own run.
+
+    Seat 0 holds the 7, 8 and 10 of clubs plus a diamond, and the 9 of clubs
+    went in a completed trick, so all three clubs win and lose identically.
+    """
+    hands = HandState(hands=[[5, 6, 8, 20], [], [], []], hakem=0, trump=3)
+    hands.played = [7, 30, 31, 32]
+    ranked = [8, 5, 6, 20]
+
+    assert _distinct_plays(hands, 0, ranked, baseline=6) == [6, 20]
+    # Without greedy in the run, the network's favourite represents it.
+    assert _distinct_plays(hands, 0, ranked, baseline=20) == [8, 20]
+    # A hand of nothing but one run leaves only greedy's card: no search needed.
+    assert _distinct_plays(hands, 0, [8, 5, 6], baseline=5) == [5]
+
+
+def test_a_card_on_the_table_still_separates_its_neighbours() -> None:
+    """The 9 in the *current* trick is live: the 8 loses to it, the 10 beats it."""
+    hands = HandState(hands=[[5, 6, 8, 20], [], [], []], hakem=0, trump=3)
+    hands.played = [7]
+    hands.current_trick = [(3, 7)]
+
+    assert _distinct_plays(hands, 0, [8, 5, 6, 20], baseline=6) == [8, 6, 20]
+
+
+def test_adjacent_ids_in_different_suits_are_not_interchangeable() -> None:
+    """The ace of clubs (12) and the two of diamonds (13) only touch as ids."""
+    hands = HandState(hands=[[12, 13], [], [], []], hakem=0, trump=3)
+
+    assert _distinct_plays(hands, 0, [12, 13], baseline=13) == [12, 13]
 
 
 def test_elimination_never_drops_the_leader_or_greedy() -> None:
