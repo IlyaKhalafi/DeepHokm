@@ -8,6 +8,7 @@ error), and it can be too slow for interactive play. Both are gated here.
 
 from __future__ import annotations
 
+import math
 import random
 import subprocess
 import sys
@@ -21,7 +22,7 @@ import torch as th
 from deephokm.env import HokmEnv
 from deephokm.env.spaces import mask_for
 from deephokm.nn.features import NUM_PLANES, NUM_SCALARS, build_features
-from deephokm.nn.numpy_qnet import NumpyQNet, load_weights, save_weights
+from deephokm.nn.numpy_qnet import NumpyQNet, _erf, gelu, load_weights, save_weights
 from deephokm.nn.rank_cnn import RankCNN, export_weights
 from deephokm.policies.random_policy import RandomPolicy
 from deephokm.rules.state import NUM_SEATS
@@ -83,6 +84,29 @@ def test_numpy_matches_torch(channels: int) -> None:
     assert np.abs(reference - got).max() < MAX_ABS_DIFF
     # The decision the model makes must be identical, not merely close.
     assert (reference.argmax(axis=1) == got.argmax(axis=1)).all()
+
+
+def test_table_erf_matches_math_erf_to_float32() -> None:
+    """The interpolated erf must be indistinguishable from the exact one.
+
+    GELU is specified against torch's erf form; a table that drifted would
+    change every activation. One float32 step is the most the two may differ.
+    """
+    rng = np.random.default_rng(0)
+    x = np.concatenate(
+        [
+            rng.uniform(-7.0, 7.0, 20000),
+            rng.normal(0.0, 1e-3, 2000),
+            [0.0, -0.0, 6.0, -6.0, 50.0, -50.0, np.inf, -np.inf],
+        ]
+    ).astype(np.float32)
+    exact = np.array([math.erf(float(v)) for v in x], dtype=np.float32)
+
+    got = _erf(x)
+
+    assert got.dtype == np.float32
+    assert (np.abs(got - exact) <= np.spacing(np.abs(exact))).all()
+    assert np.isnan(gelu(np.array([np.nan], dtype=np.float32))).all()
 
 
 def test_numpy_is_suit_equivariant() -> None:
