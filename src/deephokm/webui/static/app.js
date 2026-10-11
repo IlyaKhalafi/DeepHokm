@@ -81,7 +81,9 @@ async function api(path, options = {}) {
       if (typeof body.detail === "string") detail = body.detail;
       else if (Array.isArray(body.detail)) detail = "Invalid request";
     } catch (_) { /* keep default */ }
-    throw new Error(detail);
+    const error = new Error(detail);
+    error.status = response.status;
+    throw error;
   }
   return response.json();
 }
@@ -437,9 +439,12 @@ async function resumeGame() {
   if (!saved) return;
   try {
     state = await api(`/api/games/${saved}`);
-  } catch (_) {
-    // Games are held in server memory: evicted, or lost to a restart.
-    rememberGame(null);
+  } catch (err) {
+    // Games are held in server memory: evicted, or lost to a restart. Only
+    // the server's own 404 says so. A dropped connection or a 5xx says
+    // nothing about the game, so the id is kept for the next reload.
+    if (err.status === 404) rememberGame(null);
+    else setStatus("Could not reach the server to resume your game. Reload to try again.", true);
     return;
   }
   gameId = saved;
