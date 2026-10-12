@@ -19,10 +19,31 @@ import numpy as np
 from deephokm.cards import NUM_RANKS, NUM_SUITS
 from deephokm.rules.legality import NUM_ACTIONS
 
-_ERF = np.vectorize(math.erf, otypes=[np.float32])
 _SQRT2 = math.sqrt(2.0)
 _KERNEL_WIDTH = 3
 GRID_INPUT_DIMENSIONS = 4
+
+# numpy ships no erf, and calling math.erf once per activation was over half of
+# a forward pass. The table holds exact math.erf values on a grid fine enough
+# that linear interpolation is off by under 5e-9 relative -- an order of
+# magnitude below what a float32 can represent. The step is a power of two so
+# scaling a float32 onto the grid is exact, and erf(6) is already 1.0 in
+# float64, so clamping there loses nothing.
+_ERF_STEPS_PER_UNIT = 8192
+_ERF_LIMIT = 6 * _ERF_STEPS_PER_UNIT
+_ERF_TABLE = np.array([math.erf(i / _ERF_STEPS_PER_UNIT) for i in range(_ERF_LIMIT + 2)])
+
+
+def _erf(x: np.ndarray) -> np.ndarray:
+    """Elementwise erf, interpolated from ``_ERF_TABLE`` (odd, so |x| suffices)."""
+    # fmin, not minimum: a NaN must still index the table. It reaches the
+    # output regardless, through gelu's own multiplication by x.
+    position = np.fmin(np.abs(x) * _ERF_STEPS_PER_UNIT, _ERF_LIMIT)
+    index = position.astype(np.intp)
+    low = _ERF_TABLE[index]
+    value = low + (position - index) * (_ERF_TABLE[index + 1] - low)
+    out: np.ndarray = np.copysign(value, x).astype(np.float32)
+    return out
 
 
 def gelu(x: np.ndarray) -> np.ndarray:
@@ -32,7 +53,7 @@ def gelu(x: np.ndarray) -> np.ndarray:
     near-equal action values, so the exact form is used to keep the numpy and
     torch paths interchangeable.
     """
-    out: np.ndarray = 0.5 * x * (1.0 + _ERF(x / _SQRT2))
+    out: np.ndarray = 0.5 * x * (1.0 + _erf(x / _SQRT2))
     return out
 
 

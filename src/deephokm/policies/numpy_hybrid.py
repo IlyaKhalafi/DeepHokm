@@ -419,6 +419,14 @@ class NumpyHybridPolicy:
         Greedy's action is never eliminated, and is returned unless a survivor
         beats it on the same sign test the pure search uses, so the accept gate
         is unchanged.
+
+        Rank-adjacent cards of one suit are scored separately even when no
+        other seat can play a card between them. They win and lose the same
+        *immediate* trick, but the rollout that values the rest of the hand
+        plays :class:`GreedyPolicy` for every seat, and greedy compares
+        absolute ranks across suits when it leads and discards. Which of the
+        two cards stays in the hand therefore changes later decisions and,
+        measurably, the rollout outcome, so merging them would be pruning.
         """
         planes, scalars = build_features(observation, mask, feature_mode=self.feature_mode)
         values = self.net(planes[None], scalars[None])[0]

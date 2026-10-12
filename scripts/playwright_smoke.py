@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import Literal
 
-from playwright.sync_api import Browser, Page, sync_playwright
+from playwright.sync_api import Browser, Page, Route, sync_playwright
 
 from deephokm.rules.state import HAKEM_FIRST_BATCH
 
@@ -86,6 +87,90 @@ def _check_mobile_game(browser: Browser) -> None:
     page.screenshot(path="logs/visual_qa/smoke_mobile.png", full_page=True)
 
 
+def _check_superseded_game(
+    browser: Browser,
+    source: Literal["resume", "start"],
+    outcome: Literal["200", "404", "500", "network"],
+) -> None:
+    """Given a held A reply, starting B must make A success/errors harmless."""
+    with browser.new_context() as context:
+        page = context.new_page()
+        page.set_default_timeout(10_000)
+        context.add_init_script("""document.addEventListener('DOMContentLoaded', () => {
+            const originalResume = resumeGame;
+            resumeGame = async () => {
+                try { await originalResume(); }
+                finally { window.resumeDone = true; }
+            };
+            const originalStart = startGame;
+            let starts = 0;
+            startGame = async () => {
+                const number = ++starts;
+                try { await originalStart(); }
+                finally { window['startDone' + number] = true; }
+            };
+        });""")
+        # Given: real API states with distinct IDs and visible hand numbers.
+        payload = {"mode": "spectate", "difficulty": "fast", "seed": 1}
+        a = context.request.post(f"{BASE_URL}/api/games", data=payload).json()
+        b = context.request.post(f"{BASE_URL}/api/games", data=payload).json()
+        a["hand_number"] = 41
+        b["hand_number"] = 42
+        held: list[Route] = []
+        if source == "resume":
+            context.add_init_script(f"localStorage.setItem('deephokm.gameId', '{a['game_id']}');")
+
+            def hold_resume(route: Route) -> None:
+                held.append(route)
+
+            page.route(f"**/api/games/{a['game_id']}", hold_resume)
+            page.route("**/api/games", lambda route: route.fulfill(json=b))
+        else:
+
+            def hold_first_start(route: Route) -> None:
+                if held:
+                    route.fulfill(json=b)
+                else:
+                    held.append(route)
+
+            page.route("**/api/games", hold_first_start)
+        page.goto(BASE_URL)
+        if source == "start":
+            page.click("#start")
+        page.wait_for_function("document.readyState === 'complete'")
+        assert len(held) == 1, "A request did not reach the barrier"
+        # When: B's POST completes before A's held reply is released.
+        page.click("#start")
+        done = "startDone1" if source == "resume" else "startDone2"
+        page.wait_for_function(f"window.{done} === true")
+        before = page.evaluate("""() => ({gameId, state,
+            saved: localStorage.getItem(SAVED_GAME_KEY),
+            status: $('status').textContent, error: $('status').className,
+            visible: !$('game').classList.contains('hidden'),
+            phase: $('phase').textContent})""")
+        assert before["gameId"] == b["game_id"]
+        assert before["visible"] and "#42" in before["phase"]
+        match outcome:
+            case "200":
+                held[0].fulfill(json=a)
+            case "404" | "500":
+                held[0].fulfill(status=int(outcome), json={"detail": "stale A"})
+            case "network":
+                held[0].abort("failed")
+            case unreachable:
+                raise AssertionError(f"Unexpected response outcome: {unreachable}")
+        done = "resumeDone" if source == "resume" else "startDone1"
+        page.wait_for_function(f"window.{done} === true")
+        # Then: state, storage, visibility and status still belong to B.
+        after = page.evaluate("""() => ({gameId, state,
+            saved: localStorage.getItem(SAVED_GAME_KEY),
+            status: $('status').textContent, error: $('status').className,
+            visible: !$('game').classList.contains('hidden'),
+            phase: $('phase').textContent})""")
+        assert after == before, f"{source}/{outcome}: stale A changed B: {after}"
+        print(f"race {source}/{outcome}: B preserved")
+
+
 def main() -> int:
     """Load the page, start games, and assert the key UI elements appear."""
     if not BASE_URL:
@@ -96,6 +181,9 @@ def main() -> int:
         return 2
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
+        for source in ("resume", "start"):
+            for outcome in ("200", "404", "500", "network"):
+                _check_superseded_game(browser, source, outcome)
         _check_human_game(browser)
         _check_spectate_game(browser)
         _check_mobile_game(browser)

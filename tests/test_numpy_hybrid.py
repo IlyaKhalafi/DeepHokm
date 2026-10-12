@@ -9,6 +9,8 @@ weights alone.
 from __future__ import annotations
 
 import multiprocessing
+import random
+from typing import Any
 
 import numpy as np
 import pytest
@@ -18,8 +20,9 @@ from deephokm.env.spaces import mask_for, observation_for
 from deephokm.nn.features import PLANE_HAND, PLANE_SEEN, build_features
 from deephokm.nn.numpy_qnet import save_weights
 from deephokm.nn.rank_cnn import RankCNN, export_weights
+from deephokm.policies import numpy_hybrid
 from deephokm.policies.greedy_policy import GreedyPolicy
-from deephokm.policies.numpy_hybrid import NumpyHybridPolicy
+from deephokm.policies.numpy_hybrid import NumpyHybridPolicy, _action_value
 from deephokm.rules.engine import HokmEngine
 from deephokm.rules.state import NUM_SEATS, Phase
 
@@ -183,6 +186,81 @@ def test_allocation_mode_plays_a_full_match_legally() -> None:
     weights = export_weights(RankCNN(channels=TEST_CHANNELS).eval())
     policy = NumpyHybridPolicy(weights, verify_samples=2, allocate=True, seed=0)
     assert len(play_match(policy, seed=29)) > 13
+
+
+def touching_hearts_position() -> HokmEngine:
+    """A real position where rank-adjacent cards are different plays.
+
+    Seat 0 must follow its partner's winning ace of hearts and holds the 2, 3
+    and 4 of hearts (26, 27, 28) beside the queen and king (36, 37). No other
+    seat can ever play a heart between the 2 and the 4, so the three low
+    cards lose this trick identically -- and still lead to different hands.
+    """
+    engine = HokmEngine()
+    engine.start_match(seed=103)
+    greedy = GreedyPolicy()
+    for _ in range(11):
+        seat = engine.current_seat()
+        obs = observation_for(engine.state.hands, seat, engine.state.game_points)
+        engine.apply_action(greedy.act(obs, mask_for(engine.legal_actions(seat))), seat=seat)
+    assert engine.current_seat() == 0
+    assert engine.legal_actions(0) == [26, 27, 28, 36, 37]
+    return engine
+
+
+def test_touching_cards_have_different_rollout_values() -> None:
+    """Winning the same immediate trick does not make two cards one play.
+
+    The rollout plays greedy for every seat, and greedy compares absolute
+    ranks across suits, so which low heart stays in the hand changes the rest
+    of the hand. Here only the 4 wins it. This is the measurement that
+    disproved merging touching cards before scoring them.
+    """
+    engine = touching_hearts_position()
+    hands = engine.state.hands
+    values = {
+        action: _action_value(engine, 0, action, team=0, world=hands.hands, rng=random.Random(0))
+        for action in engine.legal_actions(0)
+    }
+
+    assert values == {26: -1.0, 27: -1.0, 28: 1.0, 36: -1.0, 37: -1.0}
+
+
+def test_elimination_scores_every_legal_action_and_finds_the_only_winner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No legal card may leave the field before it has been scored.
+
+    Every sampled world is pinned to the real deal, where the 4 of hearts is
+    the only winning card and greedy plays the 2. A search that merged the
+    low hearts into greedy's card never scored the 4 and could not return it.
+    """
+    engine = touching_hearts_position()
+    legal = engine.legal_actions(0)
+    real_deal = engine.state.hands.hands
+    monkeypatch.setattr(
+        numpy_hybrid,
+        "sample_determinized_hands",
+        lambda *args, **kwargs: [list(hand) for hand in real_deal],
+    )
+    th.manual_seed(0)
+    policy = NumpyHybridPolicy(
+        export_weights(RankCNN(channels=TEST_CHANNELS).eval()),
+        verify_samples=12,
+        eliminate=True,
+        seed=0,
+    )
+    scored: set[int] = set()
+    value = policy._value
+
+    def recording_value(engine: HokmEngine, seat: int, action: int, **kwargs: Any) -> float:
+        scored.add(action)
+        return value(engine, seat, action, **kwargs)
+
+    monkeypatch.setattr(policy, "_value", recording_value)
+
+    assert policy.decide(engine) == 28
+    assert scored == set(legal)
 
 
 def test_elimination_never_drops_the_leader_or_greedy() -> None:
