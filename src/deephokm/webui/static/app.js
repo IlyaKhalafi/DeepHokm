@@ -20,6 +20,7 @@ const SAVED_GAME_KEY = "deephokm.gameId";
 let gameId = null;
 let state = null;
 let autoTimer = null;
+let gameGeneration = 0;
 
 const $ = (id) => document.getElementById(id);
 
@@ -410,13 +411,16 @@ async function advanceUntilMyTurn() {
 }
 
 async function startGame() {
+  const generation = ++gameGeneration;
   // No seed is sent: the server picks one. The API still accepts an explicit
   // seed for reproducing a deal, which is what the evaluation harness uses.
   const mode = $("mode").value;
   const difficulty = $("difficulty").value;
   const body = { mode, difficulty };
   try {
-    state = await api("/api/games", { method: "POST", body: JSON.stringify(body) });
+    const result = await api("/api/games", { method: "POST", body: JSON.stringify(body) });
+    if (generation !== gameGeneration) return;
+    state = result;
     gameId = state.game_id;
     rememberGame(gameId);
     $("setup").classList.add("hidden");
@@ -427,19 +431,24 @@ async function startGame() {
       : `Spectating ${strength} vs ${strength}.`);
     render();
   } catch (err) {
+    if (generation !== gameGeneration) return;
     setStatus(err.message, true);
   }
 }
 
 async function resumeGame() {
+  const generation = ++gameGeneration;
   let saved = null;
   try {
     saved = localStorage.getItem(SAVED_GAME_KEY);
   } catch (_) { /* storage blocked */ }
   if (!saved) return;
   try {
-    state = await api(`/api/games/${saved}`);
+    const result = await api(`/api/games/${saved}`);
+    if (generation !== gameGeneration) return;
+    state = result;
   } catch (err) {
+    if (generation !== gameGeneration) return;
     // Games are held in server memory: evicted, or lost to a restart. Only
     // the server's own 404 says so. A dropped connection or a 5xx says
     // nothing about the game, so the id is kept for the next reload.
@@ -456,6 +465,7 @@ async function resumeGame() {
     // A reload can land mid-trick, with the AI seats still owing replies.
     await advanceUntilMyTurn();
   } catch (err) {
+    if (generation !== gameGeneration) return;
     setStatus(err.message, true);
   }
 }
@@ -511,6 +521,7 @@ window.__deephokmRender = (externalState) => {
 document.addEventListener("DOMContentLoaded", () => {
   $("start").addEventListener("click", startGame);
   $("newgame").addEventListener("click", () => {
+    ++gameGeneration;
     stopAuto();
     rememberGame(null);
     $("game").classList.add("hidden");
